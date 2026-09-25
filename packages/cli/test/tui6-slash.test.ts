@@ -160,4 +160,6 @@ test("/end：结束当前会话（daemon 侧 status=ended，PM 易用性 #10）"
 	);
 	const list = await client.request<{ sessionId: string; status: string }[]>(Methods.sessionList);
 	assert.equal(list.find((s) => s.sessionId === sid)?.status, "ended", "daemon 侧 ended");
+	// 测试体内先行停止（会话 ended 后轮询会触发连接错误，等 afterEach 会放大竞态窗口）
+	await app.stop();
 });

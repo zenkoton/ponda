@@ -176,17 +176,20 @@ export function createDataLayer(opts: DataLayerOptions): DataLayer {
 		batch(() => syncFileTreeRoot());
 	};
 
+	const safe = (p: Promise<unknown>): void => {
+		p.catch(() => {}); // 通知驱动的刷新失败静默（断连窗口）
+	};
 	const onNotification = (n: RpcNotification): void => {
 		if (n.method === Notifications.taskEvents) {
-			void refreshTask();
+			safe(refreshTask());
 			return;
 		}
 		if (n.method === Notifications.todoEvents) {
-			void refreshTodo();
+			safe(refreshTodo());
 			return;
 		}
 		if (n.method === Notifications.swarmEvents) {
-			void refreshSwarm();
+			safe(refreshSwarm());
 			return;
 		}
 		if (n.method === Notifications.permissionRequest) {

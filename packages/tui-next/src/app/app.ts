@@ -99,7 +99,8 @@ export class PondaTui {
 		this.screen.start();
 		this.running = true;
 		this.pollTimer = setInterval(() => {
-			void this.data.refresh();
+			// daemon 断连（会话结束/崩溃恢复窗口）时静默：下次轮询自愈
+			this.data.refresh().catch(() => {});
 		}, this.opts.pollMs ?? 2000);
 		// 生成中动画：仅当前会话 processing 时推进 tick（避免空转重渲染）
 		this.spinnerTimer = setInterval(() => {

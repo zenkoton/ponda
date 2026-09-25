@@ -1,0 +1,17 @@
+{
+	"name": "@ponda/cli",
+	"version": "0.1.0",
+	"description": "ponda CLI: environment management for pi coding agent (bin: ponda)",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"ponda": "./src/bin.ts"
+	},
+	"main": "./src/bin.ts",
+	"scripts": {
+		"test": "node --test test/"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}

@@ -1,0 +1,18 @@
+{
+	"name": "@ponda/core",
+	"version": "0.1.0",
+	"description": "ponda domain core: environments, resources, sessions (design: docs/design/00-overview.md)",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "node --test test/"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}

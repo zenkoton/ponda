@@ -1,9 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 /**
  * ponda CLI 入口（design: docs/design/01-environment.md）。
  * 退出码：0 成功 / 1 一般错误 / 2 环境或资源不存在 / 3 校验失败 / 4 被用户拒绝
  */
 import { EnvNotFoundError, EnvStore, pondaHome, RESERVED_WORDS, ValidationError } from "../../core/src/index.ts";
+import { runDaemonMain } from "../../daemon/src/main.ts";
 import { runDaemon } from "./commands/daemon.ts";
 import { runDataset } from "./commands/dataset.ts";
 import { runEnv } from "./commands/env.ts";
@@ -105,6 +106,7 @@ const VALUE_FLAGS = new Set([
 	"extension",
 	"theme",
 	"level",
+	"preset",
 ]);
 function needsValue(flag: string): boolean {
 	return VALUE_FLAGS.has(flag);
@@ -169,6 +171,19 @@ async function main(): Promise<number> {
 	const store = new EnvStore(pondaHome());
 	let cmd = positional[0];
 	let rest = positional.slice(1);
+
+	// daemon 自派生（打包形态下 spawn.ts 经 CLI 入口拉起 daemon；源码形态直跑 main.ts）
+	if (cmd === "_daemon") {
+		const env = typeof flags.get("env") === "string" ? (flags.get("env") as string) : "default";
+		const home = typeof flags.get("home") === "string" ? (flags.get("home") as string) : pondaHome();
+		const idle = flags.get("idle-ms");
+		await runDaemonMain({
+			env,
+			home,
+			idleMs: typeof idle === "string" ? Number.parseInt(idle, 10) : undefined,
+		});
+		return 0;
+	}
 
 	// pi 透传：转发原始参数（pi 的旗标语义与 ponda 解析器无关）
 	if (cmd === "pi") {

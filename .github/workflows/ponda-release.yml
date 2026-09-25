@@ -1,0 +1,116 @@
+name: ponda Release
+
+# ponda 发布：tag `ponda-v*` 触发 —— 测试 + 单文件 bundle + GitHub Release 附产物
+# （ponda.mjs / tar.gz 安装包 / install.sh / SHA256SUMS）。
+# 注意与上游 pi 的 `v*` tag（build-binaries.yml）互不冲突。
+on:
+  push:
+    tags:
+      - "ponda-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. ponda-v0.1.0)"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ponda-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 Release 与上传资产
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test ponda packages
+        run: |
+          for p in core cli daemon rpc sandbox metrics tui-next; do
+            echo "==> packages/$p"
+            (cd "packages/$p" && node --test test/*.test.ts)
+          done
+
+      - name: Bundle CLI
+        run: node scripts/build-ponda-bundle.mjs
+
+      - name: Smoke test bundle
+        env:
+          PONDA_HOME: ${{ runner.temp }}/ponda-home
+        run: |
+          node packages/cli/dist/ponda.mjs --version
+          node packages/cli/dist/ponda.mjs init
+          node packages/cli/dist/ponda.mjs env list
+          node packages/cli/dist/ponda.mjs run -p "release smoke"
+          node packages/cli/dist/ponda.mjs daemon stop
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist-release
+          cp packages/cli/dist/ponda.mjs dist-release/ponda.mjs
+          cp scripts/ponda-install.sh dist-release/ponda-install.sh
+          chmod +x dist-release/ponda.mjs dist-release/ponda-install.sh
+          # 安装包：bundle + 安装脚本 + 简要说明
+          tar -czf "dist-release/ponda-${TAG}.tar.gz" \
+            -C dist-release ponda.mjs ponda-install.sh \
+            -C "$GITHUB_WORKSPACE" README.md
+          cat > dist-release/INSTALL.md <<'EOF'
+          # Install ponda
+
+          Requires Node >= 22.
+
+          ## One-liner
+
+              curl -fsSL https://raw.githubusercontent.com/zenkoton/ponda/main/scripts/ponda-install.sh | sh
+
+          ## Manual
+
+          Download `ponda.mjs` from this release, then:
+
+              install -d ~/.local/bin
+              install -m 755 ponda.mjs ~/.local/bin/ponda.mjs
+              printf '#!/bin/sh\nexec node ~/.local/bin/ponda.mjs "$@"\n' > ~/.local/bin/ponda
+              chmod +x ~/.local/bin/ponda
+
+          Note: `ponda pi` (upstream pi pass-through) additionally requires a checkout of
+          this repository with `npm run build`; everything else works from the bundle alone.
+          EOF
+          ( cd dist-release && shasum -a 256 ponda.mjs "ponda-${TAG}.tar.gz" ponda-install.sh > SHA256SUMS )
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG" \
+            --title "ponda ${TAG#ponda-v}" \
+            --notes "Single-file bundle build of ponda ${TAG#ponda-v}.
+
+          ## Assets
+          - \`ponda.mjs\` — self-contained CLI bundle (Node >= 22, no npm install needed)
+          - \`ponda-${TAG}.tar.gz\` — bundle + installer + README
+          - \`ponda-install.sh\` — one-line installer (\`curl -fsSL ... | sh\`)
+          - \`SHA256SUMS\`
+
+          Install: see \`INSTALL.md\`. Note: \`ponda pi\` requires a source checkout with \`npm run build\`." \
+            --verify-tag \
+            dist-release/ponda.mjs \
+            "dist-release/ponda-${TAG}.tar.gz" \
+            dist-release/ponda-install.sh \
+            dist-release/INSTALL.md \
+            dist-release/SHA256SUMS

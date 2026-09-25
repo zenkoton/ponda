@@ -3,7 +3,7 @@
  * 先 ping 现有 daemon；不通则 detached 拉起子进程并等待就绪（M5 TUI / CLI 共用）。
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync } from "node:fs";
+import { existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { paths } from "../../core/src/paths.ts";
@@ -44,9 +44,22 @@ export async function ensureDaemon(
 	const dir = paths.daemon(home);
 	mkdirSync(dir, { recursive: true });
 	const logFd = openSync(join(dir, `${env}.log`), "a");
+	// node:sqlite（durable/metrics 存储）在 Node 24 仍是实验特性，抑制其启动警告
+	// 双形态：源码 checkout 直跑 main.ts；打包形态（bundle 内无 main.ts）经 CLI 的
+	// `_daemon` 子命令自派生（process.argv[1] = ponda 可执行入口）
+	const bundled = !existsSync(MAIN);
+	const self = process.argv[1];
 	const child = spawn(
 		process.execPath,
-		[MAIN, "--env", env, "--home", home, ...(opts.idleMs !== undefined ? ["--idle-ms", String(opts.idleMs)] : [])],
+		[
+			"--disable-warning=ExperimentalWarning",
+			...(bundled ? [self ?? "ponda", "_daemon"] : [MAIN]),
+			"--env",
+			env,
+			"--home",
+			home,
+			...(opts.idleMs !== undefined ? ["--idle-ms", String(opts.idleMs)] : []),
+		],
 		{
 			detached: true,
 			stdio: ["ignore", logFd, logFd],

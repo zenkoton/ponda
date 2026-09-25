@@ -51,7 +51,7 @@ export async function runResourceGroup(
 		return runModelCmds(ctx, action, args);
 	}
 	if (group === "provider") {
-		return runProviderCmds(ctx, action, args, flags);
+		return await runProviderCmds(ctx, action, args, flags);
 	}
 
 	switch (action) {
@@ -251,12 +251,12 @@ export async function runResourceGroup(
 
 const APIS = ["openai-completions", "openai-responses", "anthropic", "google-genai"] as const;
 
-function runProviderCmds(
+async function runProviderCmds(
 	ctx: ResContext,
 	action: string,
 	args: string[],
 	flags: Map<string, string | boolean>,
-): number {
+): Promise<number> {
 	switch (action) {
 		case "list":
 		case "ls": {
@@ -290,9 +290,21 @@ function runProviderCmds(
 			const apiKey = flags.get("api-key") ?? "$OPENAI_API_KEY";
 			const models = flags.get("model");
 			if (!name || typeof baseUrl !== "string" || typeof api !== "string" || typeof models !== "string") {
-				console.error(`用法：ponda provider add <name> --base-url <url> --api <${APIS.join("|")}> --model <id[,id...]> [--api-key <$ENV|!cmd|value>] [--env <env>]
+				// 交互式向导（design: 02 §6.2；TTY 可用时自动触发，非 TTY 回退用法说明）
+				const { runProviderWizard } = await import("./provider-wizard.ts");
+				const result = await runProviderWizard();
+				if (result === null) {
+					console.error(`用法：ponda provider add <name> --base-url <url> --api <${APIS.join("|")}> --model <id[,id...]> [--api-key <$ENV|!cmd|value>] [--env <env>]
 建议优先 --api-key '$ENV_VAR' 或 '!command'，避免明文落盘。`);
-				return 1;
+					return 1;
+				}
+				ctx.resources.installProviderDef(result.providerName, result.def);
+				ctx.resources.enable(ctx.env, "provider", result.providerName);
+				console.log(
+					c.green("✓"),
+					`provider ${result.providerName} 已入池并启用（交互式向导，${result.def.models.length} 个模型）`,
+				);
+				return 0;
 			}
 			if (!(APIS as readonly string[]).includes(api)) {
 				console.error(`--api 非法：${api}（允许：${APIS.join(" | ")}）`);
@@ -332,7 +344,7 @@ function runProviderCmds(
 			return 0;
 		}
 		default:
-			console.error("可用动作：list/add/rm/info（交互式向导见 M2 后续，当前为旗标模式）");
+			console.error("可用动作：list/add/rm/info（add 无旗标时自动进入交互式向导）");
 			return 1;
 	}
 }

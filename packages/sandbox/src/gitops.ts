@@ -88,7 +88,18 @@ export function snapshot(
 		const parentArgs: string[] = [];
 		if (prev.ok) parentArgs.push("-p", prev.stdout);
 		if (head.ok) parentArgs.push("-p", head.stdout);
-		const commit = git(workspace, ["commit-tree", tree.stdout, ...parentArgs, "-m", `ponda: ${label}`]);
+		// 快照提交身份占位（03 §8：无全局 git 身份的机器上 commit-tree 需要 committer）
+		const commit = git(workspace, [
+			"-c",
+			"user.name=ponda",
+			"-c",
+			"user.email=ponda@local",
+			"commit-tree",
+			tree.stdout,
+			...parentArgs,
+			"-m",
+			`ponda: ${label}`,
+		]);
 		if (!commit.ok) return { ok: false, detail: commit.stderr };
 		const upd = git(workspace, ["update-ref", `refs/heads/${branch}`, commit.stdout]);
 		if (!upd.ok) return { ok: false, detail: upd.stderr };

@@ -1,5 +1,6 @@
 /** provider 交互式向导（design: 02-resources.md §6.2；M2 收尾） */
 import * as readline from "node:readline";
+import { isCredentialReference, resolveCredentialLiteral } from "../../../core/src/auth.ts";
 import type { ProviderDef } from "../../../core/src/types.ts";
 
 const APIS = [
@@ -17,6 +18,8 @@ export interface WizardResult {
 	providerName: string;
 	def: ProviderDef;
 	saveToPool: boolean;
+	/** 用户直接粘贴的明文凭据：不进 def/manifest/池，由调用方存环境 auth.json（0600） */
+	plainApiKey?: string;
 }
 
 /** 交互式六步向导（TTY 可用时自动触发；非 TTY 回退旗标模式） */
@@ -106,14 +109,16 @@ export async function runProviderWizard(): Promise<WizardResult | null> {
 		const target = await askDefault("选择", "2");
 		const saveToPool = target !== "1";
 
+		// 凭据分离（02 §6.1）：引用形式（$ENV/!command）入 def；明文单独返回（→ auth.json 0600）
 		const def: ProviderDef = {
 			baseUrl,
 			api: selected.id,
-			apiKey: apiKey.length > 0 ? apiKey : "$API_KEY",
+			...(apiKey.length > 0 && isCredentialReference(apiKey) ? { apiKey } : {}),
 			models,
 		};
+		const plainApiKey = apiKey.length > 0 && !isCredentialReference(apiKey) ? apiKey : undefined;
 
-		return { providerName, def, saveToPool };
+		return { providerName, def, saveToPool, plainApiKey };
 	} finally {
 		rl.close();
 	}
@@ -124,12 +129,9 @@ async function discoverModels(baseUrl: string, apiKey: string): Promise<string[]
 	try {
 		const url = `${baseUrl.replace(/\/$/, "")}/models`;
 		const headers: Record<string, string> = { Accept: "application/json" };
-		if (apiKey.startsWith("$")) {
-			const env = process.env[apiKey.slice(1)];
-			if (env !== undefined) headers.Authorization = `Bearer ${env}`;
-		} else if (apiKey.length > 0) {
-			headers.Authorization = `Bearer ${apiKey}`;
-		}
+		// $ENV / !command / 明文均可用于发现请求（引用经 resolveCredentialLiteral 解析）
+		const resolved = apiKey.length > 0 ? resolveCredentialLiteral(apiKey) : undefined;
+		if (resolved !== undefined) headers.Authorization = `Bearer ${resolved}`;
 		const ctrl = new AbortController();
 		const timer = setTimeout(() => ctrl.abort(), 5000);
 		const res = await fetch(url, { headers, signal: ctrl.signal });

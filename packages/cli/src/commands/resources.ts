@@ -4,17 +4,23 @@ import { join } from "node:path";
 import {
 	type EnvStore,
 	HistoryIndex,
+	isCredentialReference,
 	type ProviderDef,
 	paths,
 	type ResourceKind,
 	ResourceStore,
+	readProviderCredential,
+	saveProviderCredential,
 } from "../../../core/src/index.ts";
+import { emitCliEvent } from "../telemetry-cli.ts";
 import { c, table, truncate } from "../ui.ts";
 import { currentEnv } from "./env.ts";
+import { runPi } from "./pi.ts";
+import { runProviderWizard } from "./provider-wizard.ts";
 
-export type ResourceGroup = "skills" | "tools" | "extensions" | "themes" | "prompts" | "provider" | "model";
+export type ResourceGroup = "skills" | "tools" | "extensions" | "themes" | "prompts" | "provider" | "model" | "mcp";
 
-const GROUP_KIND: Record<ResourceGroup, ResourceKind> = {
+const GROUP_KIND: Record<Exclude<ResourceGroup, "mcp">, ResourceKind> = {
 	skills: "skill",
 	tools: "tool",
 	extensions: "extension",
@@ -44,7 +50,7 @@ export async function runResourceGroup(
 	args: string[],
 	flags: Map<string, string | boolean>,
 ): Promise<number> {
-	const kind = GROUP_KIND[group];
+	const kind = GROUP_KIND[group as Exclude<ResourceGroup, "mcp">];
 
 	// provider 与 model 共用一组实现（model 为 provider 内实体）
 	if (group === "model") {
@@ -52,6 +58,9 @@ export async function runResourceGroup(
 	}
 	if (group === "provider") {
 		return await runProviderCmds(ctx, action, args, flags);
+	}
+	if (group === "mcp") {
+		return runMcpCmds(ctx, action, args, flags);
 	}
 
 	switch (action) {
@@ -170,6 +179,7 @@ export async function runResourceGroup(
 			ctx.resources.enable(ctx.env, kind, name, {
 				version: typeof flags.get("version") === "string" ? (flags.get("version") as string) : undefined,
 			});
+			emitCliEvent(ctx.store.home, ctx.env, "resource.change", { kind, name, action: "add" });
 			console.log(c.green("✓"), `已在 ${ctx.env} 启用 ${group.slice(0, -1)}：${name}`);
 			return 0;
 		}
@@ -187,6 +197,7 @@ export async function runResourceGroup(
 				return 0;
 			}
 			ctx.resources.disable(ctx.env, kind, name);
+			emitCliEvent(ctx.store.home, ctx.env, "resource.change", { kind, name, action: "rm" });
 			if (flags.get("purge") === true) {
 				const refs = ctx.resources.envReferences(kind, name);
 				if (refs.length > 0) {
@@ -276,7 +287,11 @@ async function runProviderCmds(
 						def.api,
 						truncate(def.baseUrl, 36),
 						def.models.length,
-						def.apiKey.startsWith("$") || def.apiKey.startsWith("!") ? c.green(def.apiKey) : c.yellow("明文⚠"),
+						def.apiKey !== undefined && isCredentialReference(def.apiKey)
+							? c.green(def.apiKey)
+							: readProviderCredential(ctx.store.home, ctx.env, name) !== undefined
+								? c.green("auth.json")
+								: c.dim("—"),
 					]),
 					[0, 1, 2, 4],
 				),
@@ -291,15 +306,18 @@ async function runProviderCmds(
 			const models = flags.get("model");
 			if (!name || typeof baseUrl !== "string" || typeof api !== "string" || typeof models !== "string") {
 				// 交互式向导（design: 02 §6.2；TTY 可用时自动触发，非 TTY 回退用法说明）
-				const { runProviderWizard } = await import("./provider-wizard.ts");
 				const result = await runProviderWizard();
 				if (result === null) {
 					console.error(`用法：ponda provider add <name> --base-url <url> --api <${APIS.join("|")}> --model <id[,id...]> [--api-key <$ENV|!cmd|value>] [--env <env>]
-建议优先 --api-key '$ENV_VAR' 或 '!command'，避免明文落盘。`);
+建议优先 --api-key '$ENV_VAR' 或 '!command'；直接粘贴的明文将存 envs/<env>/auth.json（0600），不落 manifest。`);
 					return 1;
 				}
 				ctx.resources.installProviderDef(result.providerName, result.def);
 				ctx.resources.enable(ctx.env, "provider", result.providerName);
+				if (result.plainApiKey !== undefined) {
+					saveProviderCredential(ctx.store.home, ctx.env, result.providerName, result.plainApiKey);
+					console.log(c.green("✓"), `明文凭据已存 envs/${ctx.env}/auth.json（0600）`);
+				}
 				console.log(
 					c.green("✓"),
 					`provider ${result.providerName} 已入池并启用（交互式向导，${result.def.models.length} 个模型）`,
@@ -310,10 +328,11 @@ async function runProviderCmds(
 				console.error(`--api 非法：${api}（允许：${APIS.join(" | ")}）`);
 				return 3;
 			}
+			const keyStr = String(apiKey);
 			const def: ProviderDef = {
 				baseUrl,
 				api: api as ProviderDef["api"],
-				apiKey: String(apiKey),
+				...(isCredentialReference(keyStr) ? { apiKey: keyStr } : {}),
 				models: String(models)
 					.split(",")
 					.map((s) => s.trim())
@@ -322,6 +341,11 @@ async function runProviderCmds(
 			};
 			ctx.resources.installProviderDef(name, def);
 			ctx.resources.enable(ctx.env, "provider", name);
+			if (!isCredentialReference(keyStr)) {
+				// 明文：存环境 auth.json（0600），不入 manifest/models.json/池
+				saveProviderCredential(ctx.store.home, ctx.env, name, keyStr);
+				console.log(c.green("✓"), `明文凭据已存 envs/${ctx.env}/auth.json（0600）`);
+			}
 			console.log(c.green("✓"), `provider ${name} 已入池并在 ${ctx.env} 启用（${def.models.length} 个模型）`);
 			return 0;
 		}
@@ -406,12 +430,12 @@ export function runMemory(ctx: ResContext, action: string): number {
 
 // —— history ——
 
-export function runHistory(
+export async function runHistory(
 	ctx: ResContext,
 	action: string,
 	args: string[],
 	flags: Map<string, string | boolean>,
-): number {
+): Promise<number> {
 	switch (action) {
 		case "list":
 		case "ls": {
@@ -464,18 +488,24 @@ export function runHistory(
 		}
 		case "attach": {
 			const id = args[0];
-			if (!id) return usage("ponda history attach <session-id>");
+			if (!id) return usage("ponda history attach <session-id> [--switch-env]");
 			const info = ctx.history.attachInfo(id);
-			console.log(`会话属于环境 ${c.bold(info.env)}：`);
-			console.log(c.dim(`  cd <工作区> && ponda pi --resume ${info.file}`));
+			const switching = flags.get("switch-env") === true;
 			if (ctx.store.readState().activeEnv !== info.env) {
-				console.log(
-					c.yellow(
-						`  当前激活环境是 ${ctx.store.readState().activeEnv}，attach 需先：ponda env activate ${info.env}`,
-					),
-				);
+				if (switching) {
+					ctx.store.activate(info.env);
+					console.log(c.dim(`已切换环境：${info.env}`));
+				} else {
+					console.log(
+						c.yellow(
+							`会话属于环境 ${info.env}（当前激活 ${ctx.store.readState().activeEnv}）；加 --switch-env 顺带切换`,
+						),
+					);
+				}
 			}
-			return 0;
+			// 以该会话所属环境恢复（design: 02 §8）：spawn pi --session <id>，
+			// PI_CODING_AGENT_DIR/SESSION_DIR 指向该环境目录
+			return await runPi(ctx.store, ["--session", info.file], "inherit", info.env);
 		}
 		case "search": {
 			const kw = args[0];
@@ -526,4 +556,114 @@ export function makeResContext(store: EnvStore, flags: Map<string, string | bool
 		json,
 		env,
 	};
+}
+
+// —— mcp-server（design: 02 §4 表：JSON 片段写 manifest.mcp → 渲染 mcp.json，无池形态）——
+
+function runMcpCmds(ctx: ResContext, action: string, args: string[], flags: Map<string, string | boolean>): number {
+	switch (action) {
+		case "list":
+		case "ls": {
+			const entries = Object.entries(ctx.store.resolve(ctx.env).effective.mcp ?? {}).filter(
+				(e): e is [string, { command?: string; url?: string; args?: string[] }] => e[1] !== null,
+			);
+			if (ctx.json) {
+				console.log(JSON.stringify(Object.fromEntries(entries), null, 2));
+				return 0;
+			}
+			if (entries.length === 0) {
+				console.log(c.dim(`环境 ${ctx.env}：未声明 MCP servers（ponda mcp add <name> --command <cmd>）`));
+				return 0;
+			}
+			console.log(
+				table(
+					["SERVER", "COMMAND", "ARGS"],
+					entries.map(([name, def]) => [
+						name,
+						truncate(def.command ?? def.url ?? "-", 40),
+						(def.args ?? []).join(" ").slice(0, 30) || "-",
+					]),
+					[0, 1],
+				),
+			);
+			console.log(c.dim("  daemon 启动时加载（per-env 隔离）；工具命名 mcp__<server>__<tool>"));
+			return 0;
+		}
+		case "add": {
+			const name = args[0];
+			const command = flags.get("command");
+			if (!name || typeof command !== "string") {
+				console.error(
+					'用法：ponda mcp add <name> --command <cmd> [--args "a,b"] [--env K=V,...] [--json-file <片段>]',
+				);
+				return 1;
+			}
+			const m = ctx.store.readManifest(ctx.env);
+			if (m === null) {
+				console.error(`环境不存在：${ctx.env}`);
+				return 2;
+			}
+			let def: Record<string, unknown>;
+			const jsonFile = flags.get("json-file");
+			if (typeof jsonFile === "string") {
+				def = JSON.parse(readFileSync(jsonFile, "utf8")) as Record<string, unknown>;
+			} else {
+				def = { command };
+				const argsFlag = flags.get("args");
+				if (typeof argsFlag === "string" && argsFlag.length > 0) {
+					def.args = argsFlag
+						.split(",")
+						.map((x) => x.trim())
+						.filter(Boolean);
+				}
+				const envFlag = flags.get("env");
+				if (typeof envFlag === "string" && envFlag.length > 0) {
+					def.env = Object.fromEntries(
+						envFlag.split(",").map((kv) => {
+							const i = kv.indexOf("=");
+							return [kv.slice(0, i), kv.slice(i + 1)];
+						}),
+					);
+				}
+			}
+			m.mcp = { ...(m.mcp ?? {}), [name]: def } as typeof m.mcp;
+			ctx.store.saveManifest(m);
+			ctx.store.rerender(ctx.env);
+			emitCliEvent(ctx.store.home, ctx.env, "resource.change", { kind: "mcp-server", name, action: "add" });
+			console.log(c.green("✓"), `MCP server ${c.bold(name)} 已声明并渲染进 mcp.json（daemon 重启后生效）`);
+			return 0;
+		}
+		case "rm": {
+			const name = args[0];
+			if (!name) return usage("ponda mcp rm <name> [--env <env>]");
+			const m = ctx.store.readManifest(ctx.env);
+			const effective = ctx.store.resolve(ctx.env).effective.mcp ?? {};
+			if (!(name in effective)) {
+				console.error(`未声明：${name}`);
+				return 2;
+			}
+			if (m !== null) {
+				(m.mcp as Record<string, unknown>)[name] = null; // null = 从父环境删除（01 §3.1）
+				ctx.store.saveManifest(m);
+				ctx.store.rerender(ctx.env);
+			}
+			emitCliEvent(ctx.store.home, ctx.env, "resource.change", { kind: "mcp-server", name, action: "rm" });
+			console.log(c.green("✓"), `MCP server ${name} 已在 ${ctx.env} 移除`);
+			return 0;
+		}
+		case "info": {
+			const name = args[0];
+			if (!name) return usage("ponda mcp info <name>");
+			const hit = ctx.store.resolve(ctx.env).effective.mcp?.[name];
+			if (hit === null || hit === undefined) {
+				console.error(`未声明：${name}`);
+				return 2;
+			}
+			printJson(hit);
+			return 0;
+		}
+		default:
+			console.error("可用动作：list | add <name> --command <cmd> | rm <name> | info <name>（--env 指定环境）");
+			return 1;
+	}
 }

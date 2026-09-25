@@ -83,15 +83,15 @@ test("computeCompletion：@文件与/命令、模糊过滤", () => {
 	assert.ok(at !== null && at.kind === "@");
 	assert.deepEqual(at.candidates, ["src/a.ts", "readme.md"], "子序列模糊命中（源顺序）");
 
-	const slash = computeCompletion("/com", { files: [] });
+	const slash = computeCompletion("/mo", { files: [] });
 	assert.ok(slash !== null && slash.kind === "/");
-	assert.ok(slash.candidates.includes("/compact"));
+	assert.ok(slash.candidates.includes("/mode"));
 
 	assert.equal(computeCompletion("普通文本", { files }), null);
 	assert.equal(computeCompletion("@zzz", { files }), null);
-	const popup = renderCompletionPopup({ kind: "/", query: "com", candidates: ["/compact"], selected: 0 }, 60);
+	const popup = renderCompletionPopup({ kind: "/", query: "mo", candidates: ["/mode"], selected: 0 }, 60);
 	assert.ok(popup[0]?.includes("Tab"));
-	assert.ok(popup[1]?.includes("▸/compact"));
+	assert.ok(popup[1]?.includes("▸/mode"));
 });
 
 // —— 文件树 ——

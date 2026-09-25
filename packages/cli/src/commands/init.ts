@@ -24,6 +24,19 @@ const RC_FILES: Record<Shell, string> = {
 
 export async function runInit(store: EnvStore, args: string[], flags: Map<string, string | boolean>): Promise<number> {
 	const home = store.home;
+
+	const wantPrint = flags.get("print") === true || flags.get("p") === true;
+	const wantAppend = flags.get("append") === true;
+	const shellArg = args[0] as Shell | undefined;
+	const shell: Shell = shellArg && (SHELLS as readonly string[]).includes(shellArg) ? shellArg : detectShell();
+	const script = shellIntegration(shell);
+
+	// --print 仅预览：不创建环境、不写集成文件
+	if (wantPrint) {
+		console.log(script);
+		return 0;
+	}
+
 	mkdirSync(home, { recursive: true });
 
 	// 1) default 环境
@@ -36,17 +49,7 @@ export async function runInit(store: EnvStore, args: string[], flags: Map<string
 	}
 
 	// 2) shell 集成
-	const wantPrint = flags.get("print") === true || flags.get("p") === true;
-	const wantAppend = flags.get("append") === true;
-	const shellArg = args[0] as Shell | undefined;
-	const shell: Shell = shellArg && (SHELLS as readonly string[]).includes(shellArg) ? shellArg : detectShell();
-
-	const script = shellIntegration(shell);
 	const integFile = paths.shellInteg(home, shell);
-	if (wantPrint) {
-		console.log(script);
-		return 0;
-	}
 	mkdirSync(join(home, "shell"), { recursive: true });
 	writeFileSync(integFile, script);
 	console.log(c.green("✓"), `已生成 ${shell} 集成脚本：${integFile}`);

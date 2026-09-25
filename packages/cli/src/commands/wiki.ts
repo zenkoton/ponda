@@ -6,7 +6,7 @@ export async function runWiki(
 	workspace: string,
 	action: string,
 	args: string[],
-	flags: Map<string, string | boolean>,
+	_flags: Map<string, string | boolean>,
 	json: boolean,
 ): Promise<number> {
 	switch (action) {

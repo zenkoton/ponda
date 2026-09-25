@@ -12,8 +12,10 @@ import { runHook } from "./commands/hook.ts";
 import { runInit } from "./commands/init.ts";
 import { runPi } from "./commands/pi.ts";
 import { makeResContext, type ResourceGroup, runHistory, runMemory, runResourceGroup } from "./commands/resources.ts";
+import { runRun } from "./commands/run.ts";
 import { runSandbox } from "./commands/sandbox.ts";
 import { runStats } from "./commands/stats.ts";
+import { runTodo } from "./commands/todo.ts";
 import { runTui } from "./commands/tui.ts";
 import { runWiki } from "./commands/wiki.ts";
 import { c } from "./ui.ts";
@@ -28,6 +30,7 @@ const RESOURCE_GROUPS: readonly ResourceGroup[] = [
 	"prompts",
 	"provider",
 	"model",
+	"mcp",
 ];
 
 interface ParsedArgs {
@@ -46,7 +49,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			positional.push(...argv.slice(i + 1));
 			break;
 		}
-		if (a.startsWith("--")) {
+		if (a === "-p") {
+			// claude -p 约定（单横线别名；主解析器只认 -- 前缀）
+			const v = argv[i + 1];
+			if (v !== undefined && !v.startsWith("-")) {
+				flags.set("prompt", v);
+				i++;
+			} else {
+				flags.set("prompt", true);
+			}
+		} else if (a.startsWith("--")) {
 			const body = a.slice(2);
 			const eq = body.indexOf("=");
 			if (eq >= 0) {
@@ -82,6 +94,17 @@ const VALUE_FLAGS = new Set([
 	"file",
 	"workspace",
 	"goal",
+	"prompt",
+	"p",
+	"timeout",
+	"args",
+	"json-file",
+	"tool",
+	"privilege",
+	"skill",
+	"extension",
+	"theme",
+	"level",
 ]);
 function needsValue(flag: string): boolean {
 	return VALUE_FLAGS.has(flag);
@@ -95,16 +118,29 @@ const HELP = `ponda ${VERSION} — 基于 pi coding agent 的环境管理（设�
                                                  export/import/rename/doctor/deactivate）
   ponda skills|tools|extensions|themes|prompts    资源管理（list/add/rm/update/info [--env E]）
   ponda provider add <n> --base-url --api --model provider/model 管理
+  ponda mcp list|add|rm [--command --args]   MCP servers（写入环境 mcp.json，daemon 加载）
   ponda memory reset|list                         环境记忆
-  ponda history list|info|rm|attach|search        跨环境会话索引
+  ponda history list|info|rm|attach|search        跨环境会话索引（attach 直接恢复会话）
   ponda <env> <资源组> <动作>                      免切换操作（如 ponda web skills list）
+  ponda run -p "<prompt>" [--json] [--new-session] headless 非交互单轮（对标 claude -p）
   ponda pi [args...]                              以当前环境透传运行 pi
+  ponda tui                                       三栏对话 TUI（/help 查看命令与键位）
+  ponda daemon start|stop|status                  每环境常驻进程管理
+  ponda goal start|ls|status|confirm|...          长时任务（成果契约/校准/结算）
+  ponda todo ls [taskId]                          任务看板
+  ponda sandbox list|settle|clean|backend         沙箱/临时工作区
+  ponda stats sessions|cost|skills                使用统计
+  ponda dataset export                            RL 轨迹导出（digest 级）
+  ponda wiki build|refresh|search                 工作区知识库
   ponda _hook prompt|env|chpwd                    shell 集成后端（内部命令）
   ponda doctor                                    环境体检（= ponda env doctor）
 
 选项：
   --json      机器可读输出（list/info/doctor）
   --version   版本
+
+模型解析（daemon/TUI 会话）：PONDA_MODEL=provider/model > ~/.ponda/ponda.json 的 model 字段
+> 环境 models.json（ponda provider add 配置）。未配置时 daemon 以演示回声模式运行。
 `;
 
 async function main(): Promise<number> {
@@ -120,7 +156,8 @@ async function main(): Promise<number> {
 		console.log(VERSION);
 		return 0;
 	}
-	if (flags.get("help") === true && positional.length === 0) {
+	// 任何子命令的 --help/-h 都直接打印帮助（先于环境存在性检查，冷启动不泼冷水）
+	if (flags.get("help") === true || argv.includes("-h")) {
 		console.log(HELP);
 		return 0;
 	}
@@ -165,7 +202,11 @@ async function main(): Promise<number> {
 		case "memory":
 			return runMemory(makeResContext(store, flags, json), rest[0] ?? "");
 		case "history":
-			return runHistory(makeResContext(store, flags, json), rest[0] ?? "", rest.slice(1), flags);
+			return await runHistory(makeResContext(store, flags, json), rest[0] ?? "", rest.slice(1), flags);
+		case "todo":
+			return await runTodo(store, rest[0] ?? "", rest.slice(1), flags, json);
+		case "run":
+			return await runRun(store, rest, flags, json);
 		case "sandbox":
 			return await runSandbox(store.home, rest[0] ?? "", rest.slice(1), flags, json);
 		case "daemon":
@@ -189,6 +230,7 @@ async function main(): Promise<number> {
 		case "prompts":
 		case "provider":
 		case "model":
+		case "mcp":
 			return await runResourceGroup(
 				makeResContext(store, flags, json),
 				cmd as ResourceGroup,
@@ -212,7 +254,14 @@ function fail(e: unknown): void {
 		console.error(`${c.red("校验失败")}：${e.message}`);
 		process.exit(3);
 	}
-	console.error(`${c.red("错误")}：${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+	// 用户级错误单行可行动；PONDA_DEBUG=1 时附全栈（调试用）
+	const detail =
+		process.env.PONDA_DEBUG === "1" && e instanceof Error
+			? (e.stack ?? e.message)
+			: e instanceof Error
+				? e.message
+				: String(e);
+	console.error(`${c.red("错误")}：${detail}`);
 	process.exit(1);
 }
 

@@ -1,6 +1,7 @@
 /**
  * `ponda _hook`：shell 集成后端（design: 01-environment.md §6.2/§6.3）。
- * 职责：提示符片段、兼容环境变量导出、目录切换自动激活（chpwd）。
+ * 职责：提示符片段、兼容环境变量导出、目录切换自动激活（chpwd）、
+ * Ctrl-P 快捷键命名空间（真实 bind，§6.3：e 列表激活 / c 创建 / i 信息 / d 删除预填）。
  */
 
 import { paths } from "../../../core/src/paths.ts";
@@ -20,8 +21,15 @@ export function shellIntegration(shell: "bash" | "zsh" | "fish"): string {
 			"end",
 			"# 提示符：把 (pi:<env>) 加入 fish_prompt，例如：",
 			"#   function fish_prompt; echo (ponda _hook prompt)(fish_default_prompt); end",
-			"# 快捷键（ponda 命名空间；可用 ~/.ponda/ponda.json 的 shell.keybindings 关闭）：",
-			"#   bind \\cp\\pe 'ponda env list; and read -l n; and ponda env activate $n'",
+			"# 快捷键（Ctrl-P 前缀命名空间，01 §6.3）：Ctrl-P 后按 e/c/i/d",
+			"function __ponda_env_list; ponda env list; commandline --current-token 'ponda env activate '; end",
+			"function __ponda_env_create; commandline --current-token 'ponda env create '; end",
+			"function __ponda_env_info; ponda env list; commandline --current-token 'ponda env info '; end",
+			"function __ponda_env_rm; ponda env list; commandline --current-token 'ponda env rm '; end",
+			"bind \\cpe __ponda_env_list",
+			"bind \\cpc __ponda_env_create",
+			"bind \\cpi __ponda_env_info",
+			"bind \\cpd __ponda_env_rm",
 			"",
 		].join("\n");
 	}
@@ -47,11 +55,40 @@ export function shellIntegration(shell: "bash" | "zsh" | "fish"): string {
 		"# 提示符嵌入：在 PS1/PROMPT 中加入 $(ponda _hook prompt)，例如：",
 		'#   PS1="$(ponda _hook prompt) \\$ "          # bash',
 		"#   PROMPT='$(ponda _hook prompt) %#'       # zsh",
-		"# 快捷键（Ctrl-P 前缀命名空间）：",
-		"#   bind -x '\"\\C-pe\":ponda-env-list'      # bash 示例",
-		"#   bindkey '^Pe' ponda-env-list            # zsh 示例",
-		"",
+		"# 快捷键（Ctrl-P 前缀命名空间，01 §6.3）：Ctrl-P 后按 e/c/i/d",
 	);
+	if (shell === "zsh") {
+		lines.push(
+			"ponda-env-list() { ponda env list; print -z 'ponda env activate '; zle reset-prompt; }",
+			"ponda-env-create() { print -z 'ponda env create '; zle reset-prompt; }",
+			"ponda-env-info() { ponda env list; print -z 'ponda env info '; zle reset-prompt; }",
+			"ponda-env-rm() { ponda env list; print -z 'ponda env rm '; zle reset-prompt; }",
+			"zle -N ponda-env-list",
+			"zle -N ponda-env-create",
+			"zle -N ponda-env-info",
+			"zle -N ponda-env-rm",
+			"bindkey '^Pe' ponda-env-list",
+			"bindkey '^Pc' ponda-env-create",
+			"bindkey '^Pi' ponda-env-info",
+			"bindkey '^Pd' ponda-env-rm",
+		);
+	} else {
+		lines.push(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: shell 展开语法，非 JS 模板
+			"__ponda_env_list() { ponda env list; READLINE_LINE='ponda env activate '; READLINE_POINT=${#READLINE_LINE}; }",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: shell 展开语法，非 JS 模板
+			"__ponda_env_create() { READLINE_LINE='ponda env create '; READLINE_POINT=${#READLINE_LINE}; }",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: shell 展开语法，非 JS 模板
+			"__ponda_env_info() { ponda env list; READLINE_LINE='ponda env info '; READLINE_POINT=${#READLINE_LINE}; }",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: shell 展开语法，非 JS 模板
+			"__ponda_env_rm() { ponda env list; READLINE_LINE='ponda env rm '; READLINE_POINT=${#READLINE_LINE}; }",
+			"bind -x '\"\\C-pe\":__ponda_env_list'",
+			"bind -x '\"\\C-pc\":__ponda_env_create'",
+			"bind -x '\"\\C-pi\":__ponda_env_info'",
+			"bind -x '\"\\C-pd\":__ponda_env_rm'",
+		);
+	}
+	lines.push("");
 	return lines.join("\n");
 }
 

@@ -25,8 +25,16 @@ export function locatePiBin(): string | null {
 	return null;
 }
 
-export async function runPi(store: EnvStore, passthrough: string[], io: StdioOptions = "inherit"): Promise<number> {
-	const r = resolveEnvForWorkspace(process.cwd(), store.readState());
+export async function runPi(
+	store: EnvStore,
+	passthrough: string[],
+	io: StdioOptions = "inherit",
+	envOverride?: string,
+): Promise<number> {
+	const r =
+		envOverride !== undefined
+			? { env: envOverride, source: "history-attach" }
+			: resolveEnvForWorkspace(process.cwd(), store.readState());
 	if (!store.exists(r.env)) {
 		console.error(`当前环境 "${r.env}"（来源：${r.source}）不存在；先运行 ponda init`);
 		return 2;

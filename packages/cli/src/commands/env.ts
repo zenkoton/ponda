@@ -1,8 +1,10 @@
 /** `ponda env` 子命令族（design: 01-environment.md §4） */
 import { readFileSync } from "node:fs";
 import { EnvNotFoundError, ValidationError } from "../../../core/src/index.ts";
+import { ResourceStore } from "../../../core/src/resources.ts";
 import type { EnvStore } from "../../../core/src/store.ts";
 import { resolveEnvForWorkspace } from "../../../core/src/workspace.ts";
+import { emitCliEvent } from "../telemetry-cli.ts";
 import { c, table, truncate } from "../ui.ts";
 
 export interface CliContext {
@@ -39,18 +41,75 @@ export async function runEnv(
 			if (typeof sp === "string") {
 				systemPrompt = sp.startsWith("@") ? readFileOrThrow(sp.slice(1)) : sp;
 			}
+			// 旗标面（design: 01 §4.1）：--tool name=command / --privilege r,w,e / --no-render；
+			// --skill/--extension/--theme 启用池内已有资源（create 后经 enable 注入）
+			const patch: Record<string, unknown> = {};
+			const tool = flags.get("tool");
+			if (typeof tool === "string") {
+				const eq = tool.indexOf("=");
+				if (eq <= 0) throw new ValidationError("--tool 形如 name=command（例如 --tool deploy=./d.sh $ARGUMENTS）");
+				patch.tools = {
+					custom: [
+						{
+							name: tool.slice(0, eq),
+							command: tool.slice(eq + 1),
+							description: `command tool ${tool.slice(0, eq)}`,
+						},
+					],
+				};
+			}
+			const privilege = flags.get("privilege");
+			if (typeof privilege === "string") {
+				const list = privilege
+					.split(",")
+					.map((x) => x.trim())
+					.filter(Boolean);
+				const bad = list.filter((x) => !["read", "write", "execute"].includes(x));
+				if (bad.length > 0)
+					throw new ValidationError(`--privilege 非法：${bad.join(",")}（read | write | execute）`);
+				patch.privileges = { privileges: list };
+			}
+			// --skill/--extension/--theme：并入 create patch（池内校验；不逐个 enable 触发渲染，
+			// 与 --no-render 正交——激活时一次性渲染注入软链接）
+			const resources = new ResourceStore(store.home, store);
+			const collectGroup = (flag: string, kind: "skill" | "extension" | "theme"): string[] => {
+				const v = flags.get(flag);
+				if (typeof v !== "string") return [];
+				const names = v
+					.split(",")
+					.map((x) => x.trim())
+					.filter(Boolean);
+				for (const n of names) {
+					if (resources.meta(kind, n) === null) {
+						throw new ValidationError(`池内不存在 ${kind}：${n}（先装池后 create）`);
+					}
+				}
+				return names;
+			};
+			const skills = collectGroup("skill", "skill");
+			const extensions = collectGroup("extension", "extension");
+			const themes = collectGroup("theme", "theme");
+			if (skills.length > 0) patch.skills = skills;
+			if (extensions.length > 0) patch.extensions = extensions;
+			if (themes.length > 0) patch.themes = themes;
+			const enabledNames = [...skills, ...extensions, ...themes];
+			const noRender = flags.get("no-render") === true;
 			const res = store.create({
 				name,
 				base: typeof flags.get("base") === "string" ? (flags.get("base") as string) : undefined,
 				description:
 					typeof flags.get("description") === "string" ? (flags.get("description") as string) : undefined,
 				systemPrompt,
+				patch: patch as never,
+				noRender,
 			});
 			if (ctx.json) {
 				printJson({ created: name, chain: res.chain });
 				return 0;
 			}
 			console.log(c.green(`✓`), `环境已创建：${c.bold(name)}（继承链：${res.chain.join(" ← ")}）`);
+			if (enabledNames.length > 0) console.log(c.dim(`  已启用资源：${enabledNames.join(", ")}`));
+			if (noRender) console.log(c.dim("  --no-render：未渲染（activate 时渲染）"));
 			console.log(c.dim(`  激活：ponda env activate ${name}`));
 			return 0;
 		}
@@ -78,7 +137,9 @@ export async function runEnv(
 				console.log(c.dim(`渲染产物将写入：${store.home}/envs/${name}`));
 				return 0;
 			}
+			const from = ctx.store.readState().activeEnv;
 			const res = store.activate(name);
+			emitCliEvent(ctx.store.home, name, "env.switch", { from, to: name, trigger: "manual" });
 			if (ctx.json) {
 				printJson({ activeEnv: name, chain: res.chain });
 				return 0;
@@ -203,8 +264,6 @@ export async function runEnv(
 			frozen.name = name;
 			delete (frozen as { base?: string }).base;
 			frozen.updatedAt = new Date().toISOString();
-			const file = require("node:fs") as { writeFileSync(p: string, d: string, e: string): void };
-			// biome-ignore lint: 冻结操作直接覆写 manifest
 			store.saveManifest(frozen);
 			store.rerender(name);
 			console.log(c.green("✓"), `环境 ${name} 已冻结（继承链切断，effective 配置固化为独立 manifest）`);

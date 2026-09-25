@@ -94,7 +94,8 @@ export async function runGoal(
 			case "verify":
 			case "settle":
 			case "close":
-			case "cancel": {
+			case "cancel":
+			case "resume": {
 				const id = args[0];
 				if (id === undefined) {
 					console.error(`用法：ponda goal ${action} <taskId>`);
@@ -107,6 +108,7 @@ export async function runGoal(
 					settle: Methods.taskSettle,
 					close: Methods.taskClose,
 					cancel: Methods.taskCancel,
+					resume: Methods.taskResume,
 				};
 				const t = await call<TaskInfo>(methodMap[action] as string, { taskId: id });
 				if (json) {
@@ -119,7 +121,7 @@ export async function runGoal(
 
 			default:
 				console.error(
-					"可用动作：start <goal> | ls/status [id] | confirm | replan | verify | settle | close | cancel [--env E]",
+					"可用动作：start <goal> | ls/status [id] | confirm | replan | verify | settle | close | cancel | resume [--env E]",
 				);
 				return 1;
 		}

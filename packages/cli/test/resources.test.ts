@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -32,7 +41,7 @@ test("M2 端到端：skills/tools/provider/免切换/memory/history", () => {
 	const home = mkdtempSync(join(tmpdir(), "ponda-m2cli-"));
 	homes.push(home);
 
-	assert.equal(run(["init", "--print"], home).code, 0);
+	assert.equal(run(["init"], home).code, 0);
 
 	// 本地 skill 安装 + 启用 + 软链接
 	const src = join(home, "my-skill");
@@ -111,7 +120,7 @@ test("M2 端到端：skills/tools/provider/免切换/memory/history", () => {
 test("rm --purge 引用保护：其他环境显式启用时拒绝删除", () => {
 	const home = mkdtempSync(join(tmpdir(), "ponda-m2cli-"));
 	homes.push(home);
-	run(["init", "--print"], home);
+	run(["init"], home);
 	const src = join(home, "s");
 	mkdirSync(src, { recursive: true });
 	writeFileSync(join(src, "SKILL.md"), "# s");
@@ -122,4 +131,51 @@ test("rm --purge 引用保护：其他环境显式启用时拒绝删除", () => 
 	const r = run(["skills", "rm", "shared", "--purge"], home);
 	assert.equal(r.code, 4);
 	assert.ok(r.err.includes("web"));
+});
+
+test("凭据隔离：明文 --api-key 存 auth.json（0600），manifest/models.json 无明文", () => {
+	const home = mkdtempSync(join(tmpdir(), "ponda-cred-"));
+	homes.push(home);
+	assert.equal(run(["init"], home).code, 0);
+
+	const r = run(
+		[
+			"provider",
+			"add",
+			"sec",
+			"--base-url",
+			"https://api.test/v1",
+			"--api",
+			"openai-completions",
+			"--model",
+			"m1",
+			"--api-key",
+			"sk-plain-secret",
+		],
+		home,
+	);
+	assert.equal(r.code, 0, r.err);
+	assert.ok(r.out.includes("auth.json"), "输出说明凭据去向");
+
+	// auth.json：0600 + 明文
+	const authFile = join(home, "envs", "default", "auth.json");
+	assert.ok(existsSync(authFile), "auth.json 存在");
+	assert.equal(statSync(authFile).mode & 0o777, 0o600, "0600");
+	assert.ok(readFileSync(authFile, "utf8").includes("sk-plain-secret"));
+
+	// manifest 与渲染产物无明文
+	const manifest = readFileSync(join(home, "envs", "default", "manifest.json"), "utf8");
+	assert.ok(!manifest.includes("sk-plain-secret"), "manifest 无明文");
+	const modelsJson = readFileSync(join(home, "envs", "default", "models.json"), "utf8");
+	assert.ok(!modelsJson.includes("sk-plain-secret"), "models.json 无明文");
+
+	// 池内 provider.json 也无明文（provider 池目录 = resources/models，02 §4 表格）
+	const poolDir = join(home, "resources", "models");
+	const poolFile = join(poolDir, readdirSync(poolDir).find((d) => d.startsWith("sec@")) ?? "", "provider.json");
+	assert.ok(!readFileSync(poolFile, "utf8").includes("sk-plain-secret"), "池无明文");
+
+	// provider list 凭据列显示 auth.json（不再出现 明文⚠）
+	const list = run(["provider", "list"], home);
+	assert.ok(list.out.includes("auth.json"), "KEY 列显示 auth.json");
+	assert.ok(!list.out.includes("明文"), "不再提示明文风险");
 });

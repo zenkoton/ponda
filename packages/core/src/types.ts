@@ -63,8 +63,12 @@ export const PROVIDER_APIS: readonly ProviderApi[] = [
 export interface ProviderDef {
 	baseUrl: string;
 	api: ProviderApi;
-	/** 支持 "$ENV_VAR" 与 "!command" 形式（pi 约定） */
-	apiKey: string;
+	/**
+	 * 凭据：只允许引用形式（"$ENV_VAR" / "!command"，pi 原生解析）。
+	 * 明文凭据由 CLI 存 env/<name>/auth.json（0600），绝不写入 manifest/models.json
+	 * （design: 02 §6.1；render 会把明文自动剥离迁移）。
+	 */
+	apiKey?: string;
 	models: { id: string; thinking?: boolean; contextWindow?: number }[];
 }
 

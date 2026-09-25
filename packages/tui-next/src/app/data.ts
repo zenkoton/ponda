@@ -21,6 +21,10 @@ export interface DataLayer {
 	refresh(): Promise<void>;
 	refreshTask(): Promise<void>;
 	refreshSwarm(): Promise<void>;
+	/** 状态行（04 §5.4）：mode/思考强度/模型/上下文占用 */
+	refreshStatusLine(list?: SessionListItem[]): Promise<void>;
+	/** 右栏 TODOLIST 段数据 */
+	refreshTodo(): Promise<void>;
 	onNotification(n: RpcNotification): void;
 }
 
@@ -107,6 +111,50 @@ export function createDataLayer(opts: DataLayerOptions): DataLayer {
 		});
 	};
 
+	/** 右栏 TODOLIST 段（04 §4.3）：当前会话的 goal 任务看板，缺省 session 看板 */
+	const refreshTodo = async (): Promise<void> => {
+		const taskId = state.task()?.taskId ?? "session";
+		try {
+			const board = await client.request<{
+				taskId: string;
+				items: { id: string; text: string; status: string }[];
+				revision: number;
+			}>(Methods.todoRead, { taskId });
+			state.setTodoBoard(board.items.length > 0 ? board : null);
+		} catch {
+			state.setTodoBoard(null);
+		}
+	};
+
+	/** 状态行（04 §5.4）：mode 来自列表；模型/思考强度/窗口来自 session.info */
+	const refreshStatusLine = async (list?: SessionListItem[]): Promise<void> => {
+		const rows = list ?? (await client.request<SessionListItem[]>(Methods.sessionList));
+		const id = state.currentId();
+		if (id === null) return;
+		const row = rows.find((r) => r.sessionId === id);
+		if (row === undefined) return;
+		try {
+			const info = await client.request<{
+				mode: string;
+				runtime: { modelId: string; thinkingLevel: string; contextWindow: number } | null;
+			}>(Methods.sessionInfo, { sessionId: id });
+			state.setStatusLine({
+				mode: info.mode,
+				thinking: info.runtime?.thinkingLevel ?? "off",
+				modelId: info.runtime?.modelId ?? "—",
+				ctxUsed: row.tokens.input + row.tokens.output,
+				ctxWindow: info.runtime?.contextWindow ?? 0,
+			});
+		} catch {
+			// 会话无 runtime（回声模式）：仅更新 mode 与占用
+			state.setStatusLine({
+				...state.statusLine(),
+				mode: row.mode ?? state.statusLine().mode,
+				ctxUsed: row.tokens.input + row.tokens.output,
+			});
+		}
+	};
+
 	const syncFileTreeRoot = (): void => {
 		const cur = state.sessions().find((s) => s.sessionId === state.currentId());
 		state.setFileTreeRoot(cur?.workspace ?? state.fileTree().root);
@@ -121,14 +169,20 @@ export function createDataLayer(opts: DataLayerOptions): DataLayer {
 			applySessionList(list);
 			state.setTotals({ ...snap.totals });
 		});
+		await refreshStatusLine(list);
 		await refreshTask();
 		await refreshSwarm();
+		await refreshTodo();
 		batch(() => syncFileTreeRoot());
 	};
 
 	const onNotification = (n: RpcNotification): void => {
 		if (n.method === Notifications.taskEvents) {
 			void refreshTask();
+			return;
+		}
+		if (n.method === Notifications.todoEvents) {
+			void refreshTodo();
 			return;
 		}
 		if (n.method === Notifications.swarmEvents) {
@@ -182,5 +236,5 @@ export function createDataLayer(opts: DataLayerOptions): DataLayer {
 		});
 	};
 
-	return { refresh, refreshTask, refreshSwarm, onNotification };
+	return { refresh, refreshTask, refreshSwarm, refreshStatusLine, refreshTodo, onNotification };
 }

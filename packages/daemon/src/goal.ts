@@ -18,6 +18,7 @@ import {
 	type SkillStateEnvelope,
 } from "../../core/src/skillstate.ts";
 import type { DeliverableChange, DeliverableSpec, TaskInfo, TaskPhase } from "../../rpc/src/protocol.ts";
+import { loadStateDir, persistState } from "./persist.ts";
 
 export class GoalError extends Error {
 	constructor(message: string) {
@@ -49,9 +50,31 @@ const VERIFY_TIMEOUT_MS = 30000;
 export class TaskRuntime {
 	private readonly tasks = new Map<string, TaskRecord>();
 	private sink: TaskEventSink | null = null;
+	/** 状态持久化目录（~/.ponda/envs/<env>/state/tasks；不传 = 纯内存，测试用） */
+	private readonly stateDir: string | null;
+
+	constructor(opts: { stateDir?: string } = {}) {
+		this.stateDir = opts.stateDir ?? null;
+		if (this.stateDir !== null) {
+			// daemon 重启恢复（05 §5.2：恢复依托 envelope 快照，不依赖历史重放）
+			const loaded = loadStateDir<TaskRecord>(this.stateDir);
+			for (const [id, rec] of loaded) {
+				if (rec?.info?.taskId === id) this.tasks.set(id, rec);
+			}
+		}
+	}
 
 	setEventSink(sink: TaskEventSink): void {
 		this.sink = sink;
+	}
+
+	/** 写穿快照：TaskRecord 全量 + envelope 双写工作区 .ponda/state/（06 §3） */
+	private persist(t: TaskRecord): void {
+		if (this.stateDir === null) return;
+		persistState(this.stateDir, t.info.taskId, t);
+		if (t.info.workspace !== null) {
+			persistState(join(t.info.workspace, ".ponda", "state"), t.info.taskId, t.envelope);
+		}
 	}
 
 	private emit(taskId: string, kind: string, extra: Record<string, unknown> = {}): void {
@@ -113,6 +136,7 @@ export class TaskRuntime {
 			verifyRounds: 0,
 		};
 		this.tasks.set(taskId, record);
+		this.persist(record);
 		this.emit(taskId, "phase", { phase: "planning" });
 		return cloneTask(record);
 	}
@@ -144,11 +168,18 @@ export class TaskRuntime {
 					attempt: 1,
 					detail: result.detail,
 				};
+				this.emit(taskId, "verify", {
+					deliverable: d.id,
+					passed: result.passed,
+					attempt: 1,
+					detail: result.detail,
+				});
 			}
 			writeFileSync(join(dir, "verify.json"), `${JSON.stringify({ taskId, entries }, null, "\t")}\n`, "utf8");
 		}
 		t.info.phase = "executing";
 		this.transition(t, "executing");
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -169,6 +200,7 @@ export class TaskRuntime {
 			t.contractHistory[t.info.contractRevision] = structuredClone(t.info.deliverables);
 		}
 		this.emit(taskId, "phase", { phase: "planning", replans: t.info.replans });
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -180,6 +212,7 @@ export class TaskRuntime {
 		if (d === undefined) throw new GoalError(`deliverable not found: ${deliverableId}`);
 		d.status = "delivered";
 		this.emit(taskId, "deliverable", { deliverable: deliverableId, status: "delivered" });
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -212,6 +245,12 @@ export class TaskRuntime {
 				attempt: t.verifyRounds,
 				detail: result.detail,
 			};
+			this.emit(taskId, "verify", {
+				deliverable: d.id,
+				passed: result.passed,
+				attempt: t.verifyRounds,
+				detail: result.detail,
+			});
 			d.status = result.passed ? "verified" : "failed";
 			if (!result.passed) allPassed = false;
 		}
@@ -220,6 +259,7 @@ export class TaskRuntime {
 			t.info.settledAt = new Date().toISOString();
 			this.transition(t, "settled");
 		}
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -230,6 +270,7 @@ export class TaskRuntime {
 		t.info.phase = "settled";
 		t.info.settledAt = new Date().toISOString();
 		this.transition(t, "settled");
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -238,6 +279,7 @@ export class TaskRuntime {
 		this.expect(t, ["settled"], "close");
 		t.info.phase = "closed";
 		this.transition(t, "closed");
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -250,6 +292,18 @@ export class TaskRuntime {
 			if (d.status !== "verified") d.status = "failed";
 		}
 		this.transition(t, "cancelled");
+		this.persist(t);
+		return cloneTask(t);
+	}
+
+	/**
+	 * daemon 崩溃/重启后恢复执行（design: 05 §5.2）：任务状态来自持久化快照，
+	 * 恢复不依赖会话历史重放——envelope 即"未来执行的充分统计量"（06 §6）。
+	 */
+	resume(taskId: string): TaskInfo {
+		const t = this.must(taskId);
+		this.expect(t, ["confirmed", "executing", "verifying"], "resume");
+		this.emit(taskId, "resumed", { phase: t.info.phase });
 		return cloneTask(t);
 	}
 
@@ -265,6 +319,7 @@ export class TaskRuntime {
 			}
 		}
 		this.emit(taskId, "change_requested", { changes });
+		this.persist(t);
 		return cloneTask(t);
 	}
 
@@ -310,6 +365,7 @@ export class TaskRuntime {
 			}
 		}
 		this.emit(taskId, "change_decided", { accepted: accept, revision: t.info.contractRevision });
+		this.persist(t);
 		return cloneTask(t);
 	}
 

@@ -38,6 +38,8 @@ export interface SwarmRuntimeOptions {
 	loopFor: (cell: SwarmCellInfo) => AgentLoop;
 	maxParallel?: number; // 默认 3（design: runtime.maxParallelSubagents）
 	maxSwarmCostUsd?: number; // 默认 5（design: 05 §6.2 费用熔断）
+	/** cell 状态迁移埋点（07 §2 swarm.cell） */
+	onTelemetry?: (cell: SwarmCellInfo, transition: string) => void;
 }
 
 export type SwarmEventSink = (event: { kind: string; cellId?: string; [k: string]: unknown }) => void;
@@ -65,6 +67,13 @@ export class SwarmRuntime {
 
 	private emit(kind: string, extra: Record<string, unknown> = {}): void {
 		this.sink?.({ kind, ...extra });
+		// 07 §2 swarm.cell 埋点：状态迁移 + 费用快照
+		if (typeof extra.cellId === "string") {
+			const rec = this.cells.get(extra.cellId);
+			if (rec !== undefined) {
+				this.opts.onTelemetry?.({ ...rec.info }, kind);
+			}
+		}
 	}
 
 	private breakerCheck(): void {
@@ -130,6 +139,7 @@ export class SwarmRuntime {
 
 		// 投递 brief（经会话队列异步执行）
 		this.opts.sessions.send(created.sessionId, spec.brief);
+		this.emit("running", { cellId });
 		return { ...info };
 	}
 

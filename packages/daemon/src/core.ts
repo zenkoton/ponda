@@ -6,8 +6,12 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentTool } from "../../agent/src/index.ts";
 import type { FauxProviderRegistration } from "../../ai/src/compat.ts";
+import { createCodingTools } from "../../coding-agent/src/core/tools/index.ts";
 import { paths } from "../../core/src/paths.ts";
+import type { PermissionMode } from "../../core/src/types.ts";
+import { rebuildMetrics } from "../../metrics/src/etl.ts";
 import {
 	type CostSnapshot,
 	type DeliverableChange,
@@ -20,7 +24,9 @@ import {
 import { type RpcConnection, RpcServer } from "../../rpc/src/server.ts";
 import { type AgentLoop, EchoAgentLoop } from "./agent-loop.ts";
 import { TaskRuntime } from "./goal.ts";
+import { loadMcpTools, type McpLoadResult } from "./mcp.ts";
 import * as piLoopModule from "./pi-loop.ts";
+import { InplaceSandboxTracker } from "./sandbox-session.ts";
 import { SessionManager } from "./sessions.ts";
 import { MAIN_CELL_ID, SwarmRuntime } from "./swarm.ts";
 import { DaemonTelemetry } from "./telemetry.ts";
@@ -54,6 +60,10 @@ export interface DaemonCoreOptions {
 	maxSwarmCostUsd?: number; // design: 05 §6.2 费用熔断（默认 5）
 	/** P4：真实 agent loop（设置后新会话经 pi-agent-core 驱动） */
 	piModel?: { modelId: string; systemPrompt?: string; faux?: FauxProviderRegistration };
+	/** 按会话构造循环（真实链路：每会话独立 Agent 上下文/工作区/守卫；优先于 piModel） */
+	loopFor?: (core: DaemonCore, ctx: { sessionId: string; workspace: string | null }) => AgentLoop;
+	/** 会话权限模式默认值（03 §7.3；TUI /mode 可逐会话切换） */
+	defaultPermissionMode?: PermissionMode;
 	/** 权限申请默认超时（超时视为拒绝，design: 03 §7.2） */
 	permissionTimeoutMs?: number;
 }
@@ -61,6 +71,8 @@ export interface DaemonCoreOptions {
 interface PendingPermission {
 	resolve: (a: PermissionAnswer) => void;
 	timer: ReturnType<typeof setTimeout>;
+	/** 决策埋点回填 privilege（07 §2 permission.decision） */
+	privilege: string;
 }
 
 export class DaemonCore {
@@ -70,11 +82,24 @@ export class DaemonCore {
 	readonly server: RpcServer;
 	readonly telemetry: DaemonTelemetry;
 	readonly todos: TodoRuntime;
+	/** inplace 沙箱活动（03 §5.2/§6：快照链/状态机/结算/回滚） */
+	readonly sandboxTracker: InplaceSandboxTracker;
+	/** per-env MCP servers（start() 加载；shutdown() 停止） */
+	private mcp: McpLoadResult = { tools: [], clients: [], warnings: [] };
+
+	get mcpTools(): AgentTool<any>[] {
+		return this.mcp.tools;
+	}
+
+	get mcpWarnings(): string[] {
+		return this.mcp.warnings;
+	}
 	private readonly startedAt = new Date().toISOString();
 	private lastActivity = Date.now();
 	private idleTimer: ReturnType<typeof setInterval> | null = null;
 	private readonly pendingPermissions = new Map<string, PendingPermission>();
 	private nextPermissionId = 1;
+	private readonly sessionModes = new Map<string, PermissionMode>();
 	private shuttingDown = false;
 	/** 退出钩子（main.ts 里 process.exit；测试里改写） */
 	onExit: ((code: number) => void) | null = null;
@@ -85,31 +110,110 @@ export class DaemonCore {
 		this.opts = opts;
 		const loop: AgentLoop = opts.loop ?? this.defaultLoop(opts);
 		this.sessions = new SessionManager(opts.home, opts.env, loop);
-		this.tasks = new TaskRuntime();
+		if (opts.loopFor !== undefined) {
+			this.sessions.loopFor = (ctx) => opts.loopFor?.(this, ctx) ?? loop;
+		}
+		// 状态持久化（05 §5.1）：任务/看板/沙箱活动快照落盘，daemon 重启不丢
+		const stateDir = join(paths.env(opts.home, opts.env), "state");
+		this.sandboxTracker = new InplaceSandboxTracker(join(stateDir, "sandbox-activities.json"));
+		// piModel 路径同样按会话构造独立循环（上下文隔离 + 工具事件落会话流，04 §5.3）
+		if (opts.loopFor === undefined && opts.piModel !== undefined) {
+			const piModel = opts.piModel;
+			this.sessions.loopFor = (ctx) =>
+				new piLoopModule.PiAgentLoop({
+					modelId: piModel.modelId,
+					systemPrompt: piModel.systemPrompt,
+					faux: piModel.faux,
+					tools: [...createCodingTools(ctx.workspace ?? opts.home), ...this.mcpTools],
+					sessionId: ctx.sessionId,
+					onToolEvent: (e) => {
+						this.appendToolEntry(ctx.sessionId, e);
+						this.telemetry.emit(
+							"tool.result",
+							{ tool: e.name, ok: e.ok, durationMs: e.durationMs, argsDigest: e.argsDigest },
+							{ sessionId: ctx.sessionId },
+						);
+					},
+					onTurnEnd: () => {
+						// 03 §5.2 模式 A 快照链：每轮变更落 ponda/snapshots/<session>
+						const ws = ctx.workspace ?? opts.home;
+						this.sandboxTracker.snapshotTurn(ctx.sessionId, ws);
+					},
+				});
+		}
+		this.tasks = new TaskRuntime({ stateDir: join(stateDir, "tasks") });
 		this.tasks.setEventSink((taskId, event) => {
 			this.server.broadcast(Notifications.taskEvents, { taskId, event });
+			// 07 §2 埋点：phase 迁移 → task.lifecycle；校准运行 → deliverable.verify
+			if (event.kind === "phase") {
+				this.telemetry.emit("task.lifecycle", { phase: event.phase, replans: event.replans ?? null }, { taskId });
+			} else if (event.kind === "resumed") {
+				this.telemetry.emit("task.lifecycle", { phase: event.phase ?? "executing", resumed: true }, { taskId });
+			} else if (event.kind === "verify") {
+				this.telemetry.emit(
+					"deliverable.verify",
+					{
+						deliverableId: event.deliverable,
+						passed: event.passed === true,
+						attempt: event.attempt ?? 1,
+						detail: event.detail ?? "",
+					},
+					{ taskId },
+				);
+			}
 		});
 		this.swarm = new SwarmRuntime({
 			sessions: this.sessions,
 			loopFor: () => this.defaultLoop(opts),
 			maxParallel: opts.maxParallelSubagents,
 			maxSwarmCostUsd: opts.maxSwarmCostUsd,
+			// 07 §2 swarm.cell 埋点（telemetry 在下方构造，闭包调用时已就绪）
+			onTelemetry: (cell, transition) => {
+				this.telemetry.emit(
+					"swarm.cell",
+					{
+						cellId: cell.cellId,
+						role: cell.role,
+						transition,
+						status: cell.status,
+						tokens: cell.tokens,
+						costUsd: cell.costUsd,
+						retries: cell.retries,
+					},
+					{ sessionId: cell.sessionId },
+				);
+			},
 		});
 		this.swarm.setEventSink((event) => {
 			this.server.broadcast(Notifications.swarmEvents, { event });
 		});
 		this.telemetry = new DaemonTelemetry({ home: opts.home, env: opts.env });
-		this.todos = new TodoRuntime();
+		this.todos = new TodoRuntime({ stateDir: join(stateDir, "todos") });
 		this.server = new RpcServer((req, conn) => this.dispatch(req.method, req.params ?? {}, conn));
 		this.server.onConnectionChange = (conn, up) => {
 			if (!up) this.sessions.dropConn(conn.id);
 		};
 		this.sessions.onEvent = (sessionId, event: SessionEvent, filter) => {
 			this.server.broadcast(Notifications.sessionEvents, { sessionId, event }, (conn) => filter(conn.id));
-			if (event.kind === "entry") {
-				this.telemetry.emit("message", { line: event.line.slice(0, 500) }, { sessionId });
+			if (event.kind === "error") {
+				this.telemetry.emit(
+					"error",
+					{ source: "session", messageDigest: event.message.slice(0, 200) },
+					{ sessionId },
+				);
 			}
 			this.touch();
+		};
+		// 07 §2 埋点：message（tokens/costUsd）与 session.end
+		this.sessions.onTurn = (sessionId, usage) => {
+			this.telemetry.emit(
+				"message",
+				{ role: "assistant", tokens: { input: usage.input, output: usage.output }, costUsd: usage.costUsd },
+				{ sessionId },
+			);
+		};
+		this.sessions.onEnd = (sessionId, reason) => {
+			this.telemetry.emit("session.end", { reason }, { sessionId });
 		};
 	}
 
@@ -123,6 +227,8 @@ export class DaemonCore {
 
 	async start(): Promise<void> {
 		mkdirSync(paths.daemon(this.opts.home), { recursive: true });
+		// per-env MCP：加载 mcp.json 声明的 servers，工具注入会话工具面（02 §4）
+		this.mcp = await loadMcpTools(this.opts.home, this.opts.env);
 		this.recoverPreviousState();
 		await this.server.listen(this.socketPath());
 		this.writeState();
@@ -202,8 +308,16 @@ export class DaemonCore {
 			p.resolve({ approved: false, scope: "once" });
 		}
 		this.pendingPermissions.clear();
+		// 存活会话的结束语义（07 §2 session.end：结束原因 daemon-shutdown）
+		for (const s of this.sessions.list()) {
+			if (s.status === "running" || s.status === "detached") {
+				this.telemetry.emit("session.end", { reason: "daemon-shutdown" }, { sessionId: s.sessionId });
+			}
+		}
 		await this.server.close();
 		this.telemetry.close();
+		this.syncMetrics();
+		for (const c of this.mcp.clients) c.stop();
 		this.onExit?.(code);
 	}
 
@@ -221,7 +335,8 @@ export class DaemonCore {
 				return "shutting down";
 
 			case Methods.sessionList:
-				return this.sessions.list();
+				// mode 为 daemon 侧事实源（03 §7.3），随列表带给 TUI 状态行
+				return this.sessions.list().map((row) => ({ ...row, mode: this.sessionMode(row.sessionId) }));
 
 			case Methods.sessionNew: {
 				const r = this.sessions.new({ workspace: strOrNull(params.workspace) });
@@ -248,6 +363,66 @@ export class DaemonCore {
 				this.sessions.send(id, text);
 				this.writeState();
 				return { queued: true, entryCount: this.sessions.get(id)?.entryCount ?? 0 };
+			}
+
+			case Methods.sessionInfo: {
+				const id = requireStr(params.sessionId);
+				const loop = this.sessions.get(id)?.loop;
+				return {
+					sessionId: id,
+					mode: this.sessionMode(id),
+					runtime: loop?.runtimeInfo?.() ?? null,
+				};
+			}
+
+			case Methods.sessionSetThinking: {
+				const id = requireStr(params.sessionId);
+				const level = requireStr(params.level);
+				if (!["off", "low", "medium", "high"].includes(level)) {
+					throw new Error(`非法思考强度：${level}（off | low | medium | high）`);
+				}
+				const loop = this.sessions.get(id)?.loop;
+				loop?.setThinkingLevel?.(level as "off" | "low" | "medium" | "high");
+				return { sessionId: id, thinkingLevel: loop?.runtimeInfo?.().thinkingLevel ?? level };
+			}
+
+			case Methods.sandboxStatus: {
+				const id = requireStr(params.sessionId);
+				const act = this.sandboxTracker.get(id);
+				if (act === null) return { sessionId: id, activity: null };
+				return { sessionId: id, activity: act, changes: this.sandboxTracker.pendingChanges(id) };
+			}
+
+			case Methods.sandboxRollback: {
+				// 撤销入口（03 §6.2 回滚；TUI /undo 弹窗确认后调用）
+				const id = requireStr(params.sessionId);
+				const baseline = params.baseline === true;
+				const turn = typeof params.turn === "number" ? params.turn : undefined;
+				const r = this.sandboxTracker.rollbackTo(id, { baseline, turn });
+				if (!r.ok) throw new Error(r.detail);
+				this.telemetry.emit(
+					"sandbox.settle",
+					{ activityId: id.slice(0, 8), mode: "inplace", outcome: "discard" },
+					{ sessionId: id },
+				);
+				return { sessionId: id, detail: r.detail };
+			}
+
+			case Methods.sessionEnd: {
+				const id = requireStr(params.sessionId);
+				this.sessions.end(id);
+				this.writeState();
+				return { ended: id };
+			}
+
+			case Methods.sessionSetMode: {
+				const id = requireStr(params.sessionId);
+				const mode = requireStr(params.mode);
+				if (!["plan", "approve", "full-auto"].includes(mode)) {
+					throw new Error(`非法权限模式：${mode}（plan | approve | full-auto）`);
+				}
+				this.sessionModes.set(id, mode as PermissionMode);
+				return { sessionId: id, mode: this.sessionMode(id) };
 			}
 
 			case Methods.swarmSpawn:
@@ -326,6 +501,10 @@ export class DaemonCore {
 				return this.todos.read(requireStr(params.taskId));
 			}
 
+			case Methods.todoList: {
+				return this.todos.list();
+			}
+
 			case Methods.permissionRespond: {
 				const requestId = requireStr(params.requestId);
 				const p = this.pendingPermissions.get(requestId);
@@ -338,6 +517,11 @@ export class DaemonCore {
 						? (params.scope as PermissionAnswer["scope"])
 						: "once",
 				};
+				this.telemetry.emit("permission.decision", {
+					privilege: p.privilege,
+					decision: answer.approved ? answer.scope : "deny",
+					requestId,
+				});
 				p.resolve(answer);
 				return { answered: requestId };
 			}
@@ -377,6 +561,9 @@ export class DaemonCore {
 
 			case Methods.taskCancel:
 				return this.tasks.cancel(requireStr(params.taskId));
+
+			case Methods.taskResume:
+				return this.tasks.resume(requireStr(params.taskId));
 
 			case Methods.taskChangeRequest:
 				return this.tasks.changeRequest(
@@ -421,16 +608,42 @@ export class DaemonCore {
 
 	// —— 权限申请（sandbox-guard 经此请求；TUI 弹窗应答，03 §7.2） ——
 
+	/** 工具执行条目落会话流（pi-loop onToolEvent → TUI 折叠行，04 §5.3） */
+	appendToolEntry(sessionId: string, e: { name: string; argsDigest: string; ok: boolean; durationMs: number }): void {
+		this.sessions.appendToolEntry(sessionId, e);
+	}
+
+	/** 会话权限模式（默认取环境默认值；TUI /mode 经 session.set_mode 覆盖） */
+	sessionMode(sessionId: string): PermissionMode {
+		return this.sessionModes.get(sessionId) ?? this.opts.defaultPermissionMode ?? "approve";
+	}
+
+	/** daemon 退出时把事件流 ETL 进 metrics.db（07 §4：daemon 空闲/退出触发） */
+	private syncMetrics(): void {
+		try {
+			const dir = join(this.opts.home, "telemetry");
+			if (!existsSync(join(dir, "events"))) return;
+			rebuildMetrics(join(dir, "metrics.db"), join(dir, "events"));
+		} catch {
+			// ETL 失败不阻塞退出；下次 rebuild 从游标续跑
+		}
+	}
+
 	requestPermission(req: Omit<PermissionRequestPending, "requestId">, timeoutMs?: number): Promise<PermissionAnswer> {
 		const t = timeoutMs ?? this.opts.permissionTimeoutMs ?? 120000;
 		const requestId = `perm-${this.nextPermissionId++}`;
 		const pending: PermissionRequestPending = { requestId, ...req };
+		this.telemetry.emit(
+			"permission.request",
+			{ privilege: req.privilege, tool: req.detail.tool, reason: req.reason, mode: req.detail.mode },
+			{},
+		);
 		return new Promise<PermissionAnswer>((resolve) => {
 			const timer = setTimeout(() => {
 				this.pendingPermissions.delete(requestId);
 				resolve({ approved: false, scope: "once" }); // 超时视为拒绝
 			}, t);
-			this.pendingPermissions.set(requestId, { resolve, timer });
+			this.pendingPermissions.set(requestId, { resolve, timer, privilege: req.privilege });
 			this.server.broadcast(Notifications.permissionRequest, {
 				request: pending,
 				timeoutMs: t,

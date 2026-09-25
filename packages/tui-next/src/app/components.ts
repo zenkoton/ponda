@@ -24,6 +24,7 @@ import {
 } from "./state.ts";
 
 const DIM: TextStyle = { dim: true };
+const YELLOW: TextStyle = { fg: "yellow" };
 const BOLD: TextStyle = { bold: true };
 const CYAN: TextStyle = { fg: "cyan" };
 const CYAN_BOLD: TextStyle = { fg: "cyan", bold: true };
@@ -72,6 +73,7 @@ export function App(state: TuiState): Element {
 		ActivityLine(state),
 		CompletionPopup(state),
 		InputBox(state),
+		StatusLineRow(state),
 		Footer(state),
 		DialogLayer(state),
 	]);
@@ -123,8 +125,71 @@ function Body(state: TuiState): Element {
 	const children: Element[] = [];
 	if (state.sidebarVisible()) children.push(Sidebar(state));
 	children.push(ChatColumn(state));
-	if (state.task() !== null) children.push(GoalPanel(state));
+	// 右栏三段（04 §4.3）：TODOLIST / 成果状态 / 权限通知——有内容时出现
+	const right = RightPanel(state);
+	if (right !== null) children.push(right);
 	return box({ flexDirection: "row", grow: 1, minHeight: 3 }, children);
+}
+
+/** 右栏（04 §4.3 垂直三段）：看板存在或任务存在时整体出现 */
+function RightPanel(state: TuiState): Element | null {
+	const todo = state.todoBoard();
+	if (todo === null && state.task() === null) return null;
+	return box(
+		{
+			width: 30,
+			shrink: 0,
+			flexDirection: "column",
+			border: { style: "round", color: BORDER_COLOR },
+			paddingLeft: 1,
+			paddingBottom: 1,
+		},
+		[TodoPanel(state), GoalPanel(state), NoticePanel(state)],
+	);
+}
+
+/** 第 1 段：TODOLIST 看板（进度条 ▓/░ + 状态计数 + 条目） */
+function TodoPanel(state: TuiState): Element {
+	const board = state.todoBoard();
+	if (board === null) return text({ text: "" });
+	const total = board.items.length;
+	const done = board.items.filter((i) => i.status === "done").length;
+	const active = board.items.find((i) => i.status === "in_progress");
+	const barCells = 20;
+	const filled = total > 0 ? Math.round((done / total) * barCells) : 0;
+	const children: Element[] = [
+		box({ height: 1, shrink: 0 }, [rich([{ text: " TODO", style: BOLD }])]),
+		rich([
+			{
+				text: ` ${"▓".repeat(filled)}${"░".repeat(barCells - filled)} ${done}/${total}${active !== undefined ? " ◐ 进行中" : ""}`,
+				style: DIM,
+			},
+		]),
+	];
+	for (const item of board.items.slice(0, 8)) {
+		children.push(text({ text: ` ${todoStatusMark(item.status)} ${item.id} ${item.text.slice(0, 18)}` }));
+	}
+	children.push(text({ text: "" }));
+	return box({ flexDirection: "column" }, children);
+}
+
+/** 第 3 段：权限/通知（待应答计数与最近事件占位，04 §4.3） */
+function NoticePanel(state: TuiState): Element {
+	const children: Element[] = [box({ height: 1, shrink: 0 }, [rich([{ text: " 通知", style: BOLD }])])];
+	if (state.dialog() !== null) {
+		children.push(rich([{ text: " ⚠ 待确认（权限/契约/合并）", style: YELLOW }]));
+	} else {
+		children.push(rich([{ text: " 无待办", style: DIM }]));
+	}
+	return box({ flexDirection: "column" }, children);
+}
+
+function todoStatusMark(status: string): string {
+	if (status === "done") return "●";
+	if (status === "in_progress") return "◐";
+	if (status === "blocked") return "⚠";
+	if (status === "cancelled") return "✕";
+	return "○";
 }
 
 /** 居中限宽容器（opencode 式）：内容列最大 CHAT_MAX_WIDTH，居中于剩余空间 */
@@ -161,8 +226,32 @@ function ChatContent(state: TuiState): Element {
 	}
 	const active = state.tabs().find((t) => t.id === state.activeTabId());
 	if (active !== undefined && active.kind === "file") return FileContent(active.path);
+	// 04 §5.3 聚合：连续同类工具条目 >5 条整组折叠为 `▸ N× name`（单遍索引分组）
+	const runOf = new Map<number, { name: string; start: number; count: number }>();
+	let cur: { name: string; start: number; count: number } | null = null;
+	entries.forEach((entry, i) => {
+		if (entry.kind !== "tool") {
+			cur = null;
+			return;
+		}
+		const name = entry.text.split(" ")[0] ?? "?";
+		if (cur === null || cur.name !== name) cur = { name, start: i, count: 0 };
+		cur.count++;
+		runOf.set(i, cur);
+	});
 	const children: Element[] = [];
 	entries.forEach((entry, i) => {
+		if (entry.kind === "tool") {
+			const run = runOf.get(i);
+			if (run !== undefined && run.count > 5) {
+				if (run.start === i) {
+					children.push(box({ paddingLeft: 1 }, [rich([{ text: `▸ ${run.count}× ${run.name}`, style: DIM }])]));
+				}
+				return; // 组内其余条目被折叠吸收
+			}
+			children.push(...ChatEntryView(entry));
+			return;
+		}
 		if (i > 0) children.push(text({ text: "" })); // 消息间空行
 		children.push(...ChatEntryView(entry));
 	});
@@ -186,6 +275,12 @@ function FileContent(path: string): Element {
 }
 
 function ChatEntryView(e: ChatEntry): Element[] {
+	if (e.kind === "tool") {
+		// 04 §5.3 工具折叠行：▸ bash cmd…（✔ 0.3s）；失败 ✘ 默认展开一行
+		const secs = ((e.durationMs ?? 0) / 1000).toFixed(1);
+		const mark = e.ok !== false ? { text: `（✔ ${secs}s）`, style: DIM } : { text: `（✘ ${secs}s）`, style: RED };
+		return [box({ paddingLeft: 1 }, [rich([{ text: "▸ ", style: DIM }, { text: e.text, style: DIM }, mark])])];
+	}
 	if (e.kind === "notice") {
 		return [rich([{ text: e.text, style: DIM }])];
 	}
@@ -297,17 +392,8 @@ function GoalPanel(state: TuiState): Element {
 	for (const d of task.deliverables.slice(0, 8)) {
 		children.push(text({ text: ` ${deliverableDot(d.status)} ${d.id} ${d.name}` }));
 	}
-	return box(
-		{
-			width: 30,
-			shrink: 0,
-			flexDirection: "column",
-			border: { style: "round", color: BORDER_COLOR },
-			paddingLeft: 1,
-			paddingBottom: 1,
-		},
-		children,
-	);
+	children.push(text({ text: "" }));
+	return box({ flexDirection: "column" }, children);
 }
 
 // —— 输入区上方：生成中指示 + 子 agent 切换条 ——
@@ -382,6 +468,22 @@ function InputBox(state: TuiState): Element {
 		},
 		lines,
 	);
+}
+
+/** 输入区状态行（04 §5.4）：mode/思考强度/模型/上下文占用；超 80% 警示 /compact */
+function StatusLineRow(state: TuiState): Element {
+	void state.editorRev(); // 跟随帧刷新（mode 切换/轮询更新信号）
+	const sl = state.statusLine();
+	const pct = sl.ctxWindow > 0 ? sl.ctxUsed / sl.ctxWindow : 0;
+	const ctxText =
+		sl.ctxWindow > 0 ? `ctx ${fmt(sl.ctxUsed)}/${fmt(sl.ctxWindow)}（${Math.round(pct * 100)}%）` : "ctx —";
+	const left: Span[] = [
+		{ text: ` mode: ${sl.mode} · think: ${sl.thinking} · model: ${sl.modelId} · ${ctxText}`, style: DIM },
+	];
+	if (pct >= 0.8) {
+		left.push({ text: "  ⚠ 上下文即将超限，可 /compact", style: YELLOW });
+	}
+	return box({ height: 1, flexDirection: "row", shrink: 0 }, [rich(left)]);
 }
 
 // —— 弹窗（modal 居中覆盖）——

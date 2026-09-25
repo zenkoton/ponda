@@ -139,18 +139,31 @@ export class HistoryIndex {
 		return entries;
 	}
 
-	remove(sessionId: string): HistoryEntry {
+	/** 按 id 前缀解析唯一会话（list 界面显示 8 位短 id；前缀歧义时报错列出候选） */
+	private resolve(sessionId: string): HistoryEntry {
 		const all = this.scan();
-		const hit = all.find((e) => e.sessionId === sessionId || basename(e.file, ".jsonl") === sessionId);
-		if (!hit) throw new Error(`history not found: ${sessionId}`);
+		const exact = all.filter((e) => e.sessionId === sessionId || basename(e.file, ".jsonl") === sessionId);
+		if (exact.length > 0) {
+			if (exact.length === 1) return exact[0] as HistoryEntry;
+			throw new Error(`history id 歧义：${sessionId} 匹配 ${exact.length} 个会话`);
+		}
+		const prefixed = all.filter((e) => e.sessionId.startsWith(sessionId));
+		if (prefixed.length === 1) return prefixed[0] as HistoryEntry;
+		if (prefixed.length > 1) {
+			throw new Error(`history id 前缀歧义：${sessionId} 匹配 ${prefixed.length} 个会话`);
+		}
+		throw new Error(`history not found: ${sessionId}`);
+	}
+
+	remove(sessionId: string): HistoryEntry {
+		const hit = this.resolve(sessionId);
 		rmSync(hit.file);
 		return hit;
 	}
 
 	/** attach 所需信息：环境 + 会话文件路径（由 CLI 用对应环境恢复） */
 	attachInfo(sessionId: string): { env: string; file: string } {
-		const hit = this.scan().find((e) => e.sessionId === sessionId || basename(e.file, ".jsonl") === sessionId);
-		if (!hit) throw new Error(`history not found: ${sessionId}`);
+		const hit = this.resolve(sessionId);
 		return { env: hit.env, file: hit.file };
 	}
 }

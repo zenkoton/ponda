@@ -63,7 +63,8 @@ test("M2 registry：无效源报错", () => {
 test("P3：PiAgentLoop 绑定 skill-state 后走 (P,Σ,O) 协议", async () => {
 	const faux = registerFauxProvider();
 	try {
-		faux.setResponses([fauxAssistantMessage("完成")]);
+		// 严格协议（06 §3）：每轮输出须带合法 state-patch 围栏块
+		faux.setResponses([fauxAssistantMessage('完成\n```state-patch\n{"state_patch": {"nextAction": "已执行"}}\n```')]);
 		const loop = new PiAgentLoop({ modelId: "faux-1", faux });
 
 		// 构造 skill-state 绑定（goal 任务的真实链路由 TaskRuntime 驱动）

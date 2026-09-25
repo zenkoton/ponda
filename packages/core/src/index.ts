@@ -1,3 +1,5 @@
+export * from "./auth.ts";
+export * from "./backtest.ts";
 export * from "./history.ts";
 export * from "./merge.ts";
 export * from "./paths.ts";

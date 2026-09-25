@@ -17,8 +17,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { isCredentialReference, mergeProviderCredentials } from "./auth.ts";
 import { ENV_SUBDIRS, paths } from "./paths.ts";
-import type { EnvManifest, ResourceSelector } from "./types.ts";
+import type { EnvManifest, ProviderDef, ResourceSelector } from "./types.ts";
 import { isExclusionSelector, selectorName } from "./validate.ts";
 
 const DEFAULT_SYSTEM_PROMPT = "You are a helpful coding agent.";
@@ -41,6 +42,8 @@ export interface RenderPlan {
 	symlinks: PlannedSymlink[];
 	/** 本轮不应存在、需要清理的旧渲染产物（相对路径） */
 	removed: string[];
+	/** manifest 中的明文凭据（provider → key）：models.json 剥离，落 auth.json（0600） */
+	credentials: Record<string, string>;
 	warnings: string[];
 }
 
@@ -119,6 +122,7 @@ export function planRender(home: string, name: string, env: EnvManifest): Render
 	const files: PlannedFile[] = [];
 	const symlinks: PlannedSymlink[] = [];
 	const removed: string[] = [];
+	const credentials: Record<string, string> = {};
 
 	// settings.json —— skills/extensions/themes 目录由 pi 的 resource-loader 自动扫描，
 	// settings 只声明主题与技能命令开关
@@ -137,7 +141,25 @@ export function planRender(home: string, name: string, env: EnvManifest): Render
 	}
 
 	if (env.models.policy === "explicit" && env.models.providers && Object.keys(env.models.providers).length > 0) {
-		const providers = Object.fromEntries(Object.entries(env.models.providers).filter(([, v]) => v !== null));
+		// 凭据分离（02 §6.1）：引用形式（$ENV/!command）随 models.json 交付（pi 原生解析）；
+		// 明文剥离进 credentials → auth.json（0600），绝不写入渲染产物
+		const providers: Record<string, ProviderDef> = {};
+		for (const [k, v] of Object.entries(env.models.providers)) {
+			if (v === null) continue;
+			if (v.apiKey !== undefined && isCredentialReference(v.apiKey)) {
+				providers[k] = v;
+			} else {
+				if (v.apiKey !== undefined && v.apiKey.length > 0) {
+					credentials[k] = v.apiKey;
+					warnings.push(
+						`provider "${k}" 的明文 apiKey 已剥离到 auth.json（建议 manifest 改用 $ENV_VAR/!command 引用；ponda doctor 可自动迁移）`,
+					);
+				}
+				const { apiKey: _stripped, ...rest } = v;
+				void _stripped;
+				providers[k] = rest as ProviderDef;
+			}
+		}
 		files.push({ path: "models.json", content: `${JSON.stringify({ providers }, null, "\t")}\n` });
 	} else {
 		removed.push("models.json");
@@ -170,7 +192,7 @@ export function planRender(home: string, name: string, env: EnvManifest): Render
 		}
 	}
 
-	return { files, symlinks, removed, warnings };
+	return { files, symlinks, removed, credentials, warnings };
 }
 
 function writeFileAtomic(abs: string, content: string): void {
@@ -194,6 +216,9 @@ export function applyRender(home: string, name: string, plan: RenderPlan): Rende
 		const abs = join(envDir, rel);
 		if (existsSync(abs)) rmSync(abs);
 	}
+
+	// 明文凭据合并进 auth.json（0600；仅当内容变化才写盘，用户手工条目保留）
+	mergeProviderCredentials(home, name, plan.credentials);
 
 	// 受管软链接：只碰"符号链接"；真实文件/目录（私有资源）永不触碰
 	for (const link of plan.symlinks) {

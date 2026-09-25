@@ -40,6 +40,9 @@ export class SessionManager {
 	private readonly env: string;
 	private readonly loop: AgentLoop;
 
+	/** 会话级循环工厂（真实 agent 循环按会话独立上下文/工作区构造；设置后 new() 逐会话调用） */
+	loopFor: ((ctx: { sessionId: string; workspace: string | null }) => AgentLoop) | null = null;
+
 	constructor(home: string, env: string, loop: AgentLoop) {
 		this.home = home;
 		this.env = env;
@@ -64,7 +67,7 @@ export class SessionManager {
 			thinkingLevel: "off",
 		};
 		appendFileSync(file, `${JSON.stringify(header)}\n`, "utf8");
-		this.sessions.set(id, {
+		const runtime: SessionRuntime = {
 			id,
 			file,
 			workspace: opts.workspace ?? null,
@@ -75,7 +78,11 @@ export class SessionManager {
 			costUsd: 0,
 			entryCount: 1,
 			queue: [],
-		});
+		};
+		if (this.loopFor !== null) {
+			runtime.loop = this.loopFor({ sessionId: id, workspace: runtime.workspace });
+		}
+		this.sessions.set(id, runtime);
 		return { sessionId: id, entryCount: 1 };
 	}
 
@@ -182,6 +189,23 @@ export class SessionManager {
 		for (const s of this.sessions.values()) s.attachedConns.delete(connId);
 	}
 
+	/** 工具执行条目（04 §5.3：TUI 折叠行数据源；type=custom ponda.tool） */
+	appendToolEntry(id: string, e: { name: string; argsDigest: string; ok: boolean; durationMs: number }): void {
+		const s = this.sessions.get(id);
+		if (s === undefined) return;
+		this.appendEntry(s, {
+			type: "custom",
+			id: `${s.id}-tool-${s.entryCount}`,
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			customType: "ponda.tool",
+			tool: e.name,
+			argsDigest: e.argsDigest,
+			ok: e.ok,
+			durationMs: e.durationMs,
+		});
+	}
+
 	/** 会话级循环覆盖（swarm 用；须在 send 之前设置） */
 	setLoop(id: string, loop: AgentLoop): void {
 		const s = this.must(id);
@@ -214,6 +238,7 @@ export class SessionManager {
 				if (text === undefined) break;
 				const result = await (s.loop ?? this.loop).process({ userText: text, entryCount: s.entryCount });
 				this.addUsage(s, result.usage);
+				this.onTurn?.(s.id, result.usage);
 				this.appendEntry(s, {
 					type: "message",
 					timestamp: new Date().toISOString(),
@@ -267,6 +292,7 @@ export class SessionManager {
 			customType: "ponda.ended",
 		});
 		this.emit(s.id, { kind: "status", status: "ended", processing: false });
+		this.onEnd?.(id, "ended");
 	}
 
 	markInterrupted(id: string): void {
@@ -305,6 +331,10 @@ export class SessionManager {
 
 	/** 队列排空（处理结束）回调（swarm 判定 cell 完成的依据） */
 	onIdle: ((sessionId: string) => void) | null = null;
+	/** 每轮完成回调（telemetry message 埋点：tokens/costUsd，07 §2） */
+	onTurn: ((sessionId: string, usage: Usage) => void) | null = null;
+	/** 会话结束回调（telemetry session.end：ended / interrupted） */
+	onEnd: ((sessionId: string, reason: string) => void) | null = null;
 
 	private must(id: string): SessionRuntime {
 		const s = this.sessions.get(id);

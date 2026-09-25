@@ -1,10 +1,5 @@
-/**
- * todolist 运行时（design: 05-runtime.md §2）。
- * 工具面：todo_write（批量操作 + 乐观锁）/ todo_read；
- * 事件面：todo.events 每次变更广播（TUI 右栏实时刷新）。
- */
-import { randomUUID } from "node:crypto";
 import type { TodoBoard, TodoItem } from "../../rpc/src/protocol.ts";
+import { loadStateDir, persistState } from "./persist.ts";
 
 export interface TodoOp {
 	op: "add" | "update" | "remove";
@@ -23,6 +18,24 @@ export interface TodoDiff {
 
 export class TodoRuntime {
 	private boards = new Map<string, TodoBoard>();
+	/** 看板持久化目录（~/.ponda/envs/<env>/state/todos；不传 = 纯内存，测试用）。
+	 *  05 §2.1 要求"随会话持久化"——daemon 重启后 ponda todo ls / TUI 右栏仍可见。 */
+	private readonly stateDir: string | null;
+
+	constructor(opts: { stateDir?: string } = {}) {
+		this.stateDir = opts.stateDir ?? null;
+		if (this.stateDir !== null) {
+			const loaded = loadStateDir<TodoBoard>(this.stateDir);
+			for (const [id, b] of loaded) {
+				if (b?.taskId === id) this.boards.set(id, b);
+			}
+		}
+	}
+
+	private persist(board: TodoBoard): void {
+		if (this.stateDir === null) return;
+		persistState(this.stateDir, board.taskId, board);
+	}
 
 	get(taskId: string): TodoBoard {
 		const existing = this.boards.get(taskId);
@@ -75,6 +88,7 @@ export class TodoRuntime {
 		}
 
 		board.revision++;
+		this.persist({ ...board, items: [...board.items] });
 		return { board: { ...board, items: [...board.items] }, diff };
 	}
 

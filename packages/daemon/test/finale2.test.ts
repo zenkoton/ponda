@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -29,6 +28,9 @@ afterEach(async () => {
 
 test("telemetry：session.new + message 事件写入 JSONL（脱敏后）", async () => {
 	const home = newHome();
+	// 默认关闭（07 §1）：显式开启后才写事件
+	mkdirSync(join(home), { recursive: true });
+	writeFileSync(join(home, "ponda.json"), JSON.stringify({ telemetry: { enabled: true } }), "utf8");
 	const faux = registerFauxProvider();
 	fauxes.push(faux);
 	faux.setResponses([fauxAssistantMessage("回复")]);
@@ -139,7 +141,7 @@ test("sandbox-guard：beforeToolCall 拦截（拒绝高危 + 重写路径）", a
 	const intercepted: { name: string; allowed: boolean }[] = [];
 	loop.bindToolGuard({
 		beforeToolCall: (call) => {
-			const allowed = !call.arguments["dangerous"];
+			const allowed = !call.arguments.dangerous;
 			intercepted.push({ name: call.name, allowed });
 			return { allowed, reason: allowed ? "" : "高危拒绝" };
 		},

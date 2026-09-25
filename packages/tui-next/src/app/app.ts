@@ -155,12 +155,55 @@ export class PondaTui {
 			this.state.setScroll(0);
 			this.state.setFileTreeRoot(workspace ?? this.state.fileTree().root);
 		});
+		void this.data.refreshStatusLine();
+	}
+
+	/** 权限模式循环 plan→approve→full-auto（03 §7.3）；经 RPC 落 daemon 会话级状态 */
+	private async cycleMode(): Promise<void> {
+		const order = ["plan", "approve", "full-auto"] as const;
+		const cur = this.state.statusLine().mode;
+		const idx = order.indexOf(cur as (typeof order)[number]);
+		const next = order[(idx + 1) % order.length] ?? "approve";
+		try {
+			await this.ensureSendableSession();
+			const sessionId = this.state.currentId();
+			if (sessionId === null) return;
+			await this.opts.client.request(Methods.sessionSetMode, { sessionId, mode: next });
+			this.state.setStatusLine({ ...this.state.statusLine(), mode: next });
+			this.state.setHint(`mode: ${next}`);
+		} catch (e) {
+			this.state.setHint(e instanceof Error ? e.message.slice(0, 60) : "切换失败");
+		}
+	}
+
+	/** 思考强度循环 off→low→medium→high（04 §5.4；^x ctrl+t / daemon session.set_thinking） */
+	private async cycleThinking(): Promise<void> {
+		const order = ["off", "low", "medium", "high"] as const;
+		const cur = this.state.statusLine().thinking;
+		const idx = order.indexOf(cur as (typeof order)[number]);
+		const next = order[(idx + 1) % order.length] ?? "off";
+		try {
+			await this.ensureSendableSession();
+			const sessionId = this.state.currentId();
+			if (sessionId === null) return;
+			await this.opts.client.request(Methods.sessionSetThinking, { sessionId, level: next });
+			this.state.setStatusLine({ ...this.state.statusLine(), thinking: next });
+			this.state.setHint(`think: ${next}`);
+		} catch (e) {
+			this.state.setHint(e instanceof Error ? e.message.slice(0, 60) : "切换失败");
+		}
 	}
 
 	private inputDeps(): InputDeps {
 		return {
 			quit: () => {
 				void this.stop();
+			},
+			cycleMode: () => {
+				void this.cycleMode();
+			},
+			cycleThinking: () => {
+				void this.cycleThinking();
 			},
 			attach: (sessionId) => {
 				void this.attach(sessionId, 0);
@@ -211,6 +254,7 @@ export class PondaTui {
 		this.state.setCompletion(null);
 		this.state.bumpEditor();
 		if (text.length === 0) return;
+		if (await this.runSlashCommand(text)) return;
 		try {
 			this.state.setHint("");
 			const cellId = this.state.swarm().selectedCellId;
@@ -250,6 +294,158 @@ export class PondaTui {
 		});
 		await this.attach(created.sessionId, 0);
 		await this.data.refresh();
+	}
+
+	// —— 斜杠命令（04 §5.4：/ 命令补全项与执行面保持一致） ——
+
+	private static readonly SLASH_HELP = [
+		"ponda 命令：",
+		"  /help                    本帮助",
+		"  /new                     新建会话并切换",
+		"  /sessions                打开会话侧栏",
+		"  /mode <plan|approve|full-auto>  切换权限模式（03 §7.3）",
+		"  /goal <目标描述>          启动 goal 任务（成果契约确认弹窗随后出现）",
+		"  /wiki-rebuild            重建当前工作区 .wiki 知识库",
+		"  /undo                    撤销最近一轮修改（回到上一快照/baseline）",
+		"  /end                     结束当前会话（转只读；后台任务不受影响）",
+		"键位：Esc 导航模式（j/k 滚动、t 侧栏、[/] 标签页、Tab 下一会话、p 权限模式）；Ctrl-X 前缀键（^x p 切模式、^x ctrl+t 切思考强度）。",
+	].join("\n");
+
+	/** 本地通知：以 assistant 条目形式进对话流（不落盘，仅本 UI） */
+	private appendLocalNotice(text: string): void {
+		this.state.appendEntryLine(
+			JSON.stringify({
+				type: "message",
+				timestamp: new Date().toISOString(),
+				message: { role: "assistant", content: [{ type: "text", text }] },
+			}),
+		);
+	}
+
+	/** 处理 / 命令；返回 false 表示不是命令（走正常发送） */
+	private async runSlashCommand(text: string): Promise<boolean> {
+		if (!text.startsWith("/")) return false;
+		const space = text.indexOf(" ");
+		const cmd = space === -1 ? text : text.slice(0, space);
+		const arg = space === -1 ? "" : text.slice(space + 1).trim();
+		try {
+			switch (cmd) {
+				case "/help":
+					this.appendLocalNotice(PondaTui.SLASH_HELP);
+					return true;
+				case "/new": {
+					const created = await this.opts.client.request<{ sessionId: string }>(Methods.sessionNew, {
+						workspace: process.cwd(),
+					});
+					await this.attach(created.sessionId, 0);
+					await this.data.refresh();
+					this.state.setHint("已新建会话");
+					return true;
+				}
+				case "/sessions":
+					this.state.showSidebar("sessions");
+					return true;
+				case "/end": {
+					// 结束当前会话（PM 易用性 #10；ended 会话转只读，后台任务不受影响）
+					const sessionId = this.state.currentId();
+					if (sessionId === null) {
+						this.appendLocalNotice("当前无会话");
+						return true;
+					}
+					await this.opts.client.request(Methods.sessionEnd, { sessionId });
+					this.state.setHint("会话已结束（只读）");
+					await this.data.refresh();
+					return true;
+				}
+				case "/undo": {
+					// TUI 内撤销入口（PM 对标项）：基于快照链回滚最近一轮（03 §6.2）
+					await this.ensureSendableSession();
+					const sessionId = this.state.currentId();
+					if (sessionId === null) return true;
+					const st = await this.opts.client.request<{
+						activity: { turns: number; baseline: string | null } | null;
+						changes: { path: string; status: string }[];
+					}>(Methods.sandboxStatus, { sessionId });
+					if (st.activity === null) {
+						this.appendLocalNotice("无快照链（本会话尚未产生可撤销的修改）");
+						return true;
+					}
+					const target = st.activity.turns <= 1 ? { baseline: true as const } : { turn: st.activity.turns - 1 };
+					const label = "baseline" in target ? "baseline" : `turn ${target.turn}`;
+					this.openMergeConfirm(
+						st.changes.map((c) => ({ path: c.path, status: c.status })),
+						`撤销最近一轮修改，回到 ${label}？（reset --hard，未提交变更将丢失）`,
+						{
+							onApply: () => {
+								void this.opts.client
+									.request(Methods.sandboxRollback, { sessionId, ...target })
+									.then(() => {
+										this.state.setHint(`已回滚到 ${label}`);
+										this.appendLocalNotice(`已撤销最近一轮修改（回到 ${label}，快照链保留）`);
+									})
+									.catch((e: unknown) => {
+										this.state.setHint(e instanceof Error ? e.message.slice(0, 60) : "回滚失败");
+									});
+							},
+							onDiscard: () => {
+								this.state.setHint("已取消撤销");
+							},
+						},
+					);
+					return true;
+				}
+				case "/mode": {
+					if (arg !== "plan" && arg !== "approve" && arg !== "full-auto") {
+						this.appendLocalNotice(
+							"用法：/mode <plan|approve|full-auto>\nplan：一切写/执行需确认；approve：工作区内预授；full-auto：工作区内写与执行预授。",
+						);
+						return true;
+					}
+					await this.ensureSendableSession();
+					const sessionId = this.state.currentId();
+					if (sessionId === null) return true;
+					await this.opts.client.request(Methods.sessionSetMode, { sessionId, mode: arg });
+					this.state.setStatusLine({ ...this.state.statusLine(), mode: arg });
+					this.state.setHint(`mode: ${arg}`);
+					return true;
+				}
+				case "/goal": {
+					if (arg.length === 0) {
+						this.appendLocalNotice("用法：/goal <目标描述>");
+						return true;
+					}
+					const ws = this.currentWorkspace();
+					const r = await this.opts.client.request<{ taskId: string }>(Methods.taskStart, {
+						goal: arg,
+						workspace: ws,
+					});
+					this.appendLocalNotice(`goal 任务已创建：${r.taskId}\n确认成果契约后进入 executing；右栏可看成果状态。`);
+					return true;
+				}
+				case "/wiki-rebuild": {
+					const ws = this.currentWorkspace();
+					const r = await this.opts.client.request<{ created: string[] }>(Methods.wikiBuild, {
+						workspace: ws,
+					});
+					this.appendLocalNotice(
+						`wiki 重建完成（${ws}）：${r.created.length} 页\n${r.created.map((p) => `- ${p}`).join("\n")}`,
+					);
+					return true;
+				}
+				default:
+					this.appendLocalNotice(`未知命令：${cmd}\n输入 /help 查看可用命令。`);
+					return true;
+			}
+		} catch (e) {
+			this.state.setHint(e instanceof Error ? e.message.slice(0, 60) : "命令执行失败");
+			return true;
+		}
+	}
+
+	private currentWorkspace(): string {
+		const id = this.state.currentId();
+		const row = id !== null ? this.state.sessions().find((s) => s.sessionId === id) : undefined;
+		return row?.workspace ?? process.cwd();
 	}
 
 	// —— 合并/结算确认（sandbox-guard 接入后由事件触发；公开供驱动/测试） ——

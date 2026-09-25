@@ -13,15 +13,16 @@ export interface CompletionState {
 	selected: number;
 }
 
-/** 内置 / 命令（ponda 注入；pi 原生命令在 P1 接入后合并） */
+/** 内置 / 命令（app.ts runSlashCommand 一一对应；新增命令两处同步改） */
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
-	{ name: "/help", description: "帮助" },
-	{ name: "/compact", description: "压缩上下文" },
-	{ name: "/mode", description: "切换权限模式" },
-	{ name: "/goal", description: "启动 goal 任务（M6）" },
-	{ name: "/wiki-rebuild", description: "重建 .wiki（M9）" },
-	{ name: "/skill", description: "强制加载 skill" },
-	{ name: "/mcp", description: "MCP 面板" },
+	{ name: "/help", description: "帮助（命令与键位）" },
+	{ name: "/new", description: "新建会话并切换" },
+	{ name: "/sessions", description: "打开会话侧栏" },
+	{ name: "/mode", description: "切换权限模式：/mode <plan|approve|full-auto>" },
+	{ name: "/goal", description: "启动 goal 任务：/goal <目标描述>" },
+	{ name: "/wiki-rebuild", description: "重建工作区 .wiki 知识库" },
+	{ name: "/undo", description: "撤销最近一轮修改（快照链回滚）" },
+	{ name: "/end", description: "结束当前会话（转只读）" },
 ];
 
 /** 子序列模糊匹配（@/ 补全体量小，够用） */

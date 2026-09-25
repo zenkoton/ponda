@@ -263,3 +263,7 @@ export function aggregateSkillStats(samples: SkillStatInput[]): SkillStat[] {
 		})
 		.sort((a, b) => b.invokes - a.invokes);
 }
+
+// —— metrics.db 指标层与 ETL（07 §4）——
+export * from "./db.ts";
+export * from "./etl.ts";

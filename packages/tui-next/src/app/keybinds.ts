@@ -22,6 +22,8 @@ export type InputCommand =
 	| "tabs.prev"
 	| "tabs.close"
 	| "session.next"
+	| "session.cycle-mode"
+	| "session.cycle-thinking"
 	| "files.open-selected"
 	| "input.enter"
 	| "swarm.back-to-main"
@@ -56,6 +58,7 @@ const NAV_BINDINGS: Record<string, InputCommand> = {
 	"[": "tabs.prev",
 	x: "tabs.close",
 	tab: "session.next",
+	p: "session.cycle-mode",
 	enter: "files.open-selected",
 	i: "input.enter",
 	m: "swarm.back-to-main",
@@ -86,6 +89,7 @@ const INPUT_BINDINGS: Record<string, InputCommand> = {
 /** leader（ctrl+x）后的单键：输入中也可用的导航命令（opencode 默认 leader 同为 ctrl+x） */
 const LEADER_BINDINGS: Record<string, InputCommand> = {
 	q: "app.quit",
+	"ctrl+t": "session.cycle-thinking",
 	j: "chat.scroll-down",
 	down: "chat.scroll-down",
 	k: "chat.scroll-up",
@@ -96,6 +100,7 @@ const LEADER_BINDINGS: Record<string, InputCommand> = {
 	"]": "tabs.next",
 	"[": "tabs.prev",
 	tab: "session.next",
+	p: "session.cycle-mode",
 	m: "swarm.back-to-main",
 	"1": "swarm.cell-1",
 	"2": "swarm.cell-2",
@@ -112,6 +117,10 @@ const LEADER_BINDINGS: Record<string, InputCommand> = {
 export interface InputDeps {
 	quit(): void;
 	attach(sessionId: string): void;
+	/** 权限模式循环 plan→approve→full-auto（03 §7.3；^x p / 导航 p） */
+	cycleMode(): void;
+	/** 思考强度循环 off→low→medium→high（04 §5.4 Ctrl-T） */
+	cycleThinking(): void;
 	detach(sessionId: string): void;
 	send(): void;
 	confirmContract(taskId: string): void;
@@ -213,6 +222,12 @@ function runCommand(command: InputCommand, state: TuiState, deps: InputDeps, key
 			}
 			return;
 		}
+		case "session.cycle-mode":
+			deps.cycleMode();
+			return;
+		case "session.cycle-thinking":
+			deps.cycleThinking();
+			return;
 		case "files.open-selected":
 			openSelectedFile(state);
 			return;
@@ -275,13 +290,23 @@ function runCommand(command: InputCommand, state: TuiState, deps: InputDeps, key
 			recomputeCompletion(state);
 			state.bumpEditor();
 			return;
-		case "editor.submit":
-			if (state.completion() !== null) {
+		case "editor.submit": {
+			const completion = state.completion();
+			if (completion !== null) {
+				// 命令已完整输入（token 与选中候选一致）→ 直接发送，不吞掉这次 Enter
+				const token = state.editor.currentToken()?.token ?? "";
+				const selected = completion.candidates[completion.selected];
+				if (completion.kind === "/" && token === selected) {
+					state.setCompletion(null);
+					deps.send();
+					return;
+				}
 				acceptCompletion(state);
 				return;
 			}
 			deps.send();
 			return;
+		}
 		case "completion.accept":
 			// 输入模式下的 Tab：有补全就接受；编辑器为空则切换会话侧栏
 			if (state.completion() !== null) {

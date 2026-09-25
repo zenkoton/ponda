@@ -1,7 +1,7 @@
 /**
  * daemon 运行时埋点（design: 07-data.md §2；M10 余项）。
  * DaemonCore 经此把 session/tool/task/swarm 事件写入 telemetry JSONL；
- * 脱敏同步执行，本地存储，默认开启（ponda.json telemetry.enabled 可关）。
+ * 脱敏同步执行，本地存储，默认关闭（ponda.json telemetry.enabled 开启，07 §1）。
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -53,10 +53,10 @@ export class DaemonTelemetry {
 function readEnabled(home: string): boolean {
 	try {
 		const f = join(home, "ponda.json");
-		if (!existsSync(f)) return true;
+		if (!existsSync(f)) return false; // 默认关闭（design: 07 §1）
 		const cfg = JSON.parse(readFileSync(f, "utf8")) as { telemetry?: { enabled?: boolean } };
-		return cfg.telemetry?.enabled ?? true;
+		return cfg.telemetry?.enabled ?? false;
 	} catch {
-		return true;
+		return false;
 	}
 }

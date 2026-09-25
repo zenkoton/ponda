@@ -48,6 +48,12 @@ export const Methods = {
 	sessionAttach: "session.attach",
 	sessionDetach: "session.detach",
 	sessionSend: "session.send",
+	sessionSetMode: "session.set_mode",
+	sessionInfo: "session.info",
+	sessionSetThinking: "session.set_thinking",
+	sessionEnd: "session.end",
+	sandboxStatus: "sandbox.status",
+	sandboxRollback: "sandbox.rollback",
 	permissionRespond: "permission.respond",
 	costSnapshot: "cost.snapshot",
 	taskStatus: "task.status",
@@ -58,6 +64,7 @@ export const Methods = {
 	taskSettle: "task.settle",
 	taskClose: "task.close",
 	taskCancel: "task.cancel",
+	taskResume: "task.resume",
 	taskChangeRequest: "task.change_request",
 	taskApproveChange: "task.approve_change",
 	swarmSpawn: "swarm.spawn",
@@ -72,6 +79,7 @@ export const Methods = {
 	wikiRefresh: "wiki.refresh",
 	todoWrite: "todo.write",
 	todoRead: "todo.read",
+	todoList: "todo.list",
 } as const;
 
 /** daemon → 客户端的通知（session.events 流等） */
@@ -222,6 +230,8 @@ export type SessionEvent = SessionEntryEvent | SessionStatusEvent | SessionError
 export interface SessionListItem {
 	sessionId: string;
 	status: "running" | "detached" | "ended" | "interrupted";
+	/** 会话权限模式（03 §7.3；daemon 侧事实源） */
+	mode?: string;
 	processing: boolean;
 	attached: number;
 	tokens: { input: number; output: number };

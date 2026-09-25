@@ -35,7 +35,7 @@ export const DEFAULT_MD_THEME: MdTheme = {
 export type MdBlock =
 	| { type: "heading"; level: number; text: string }
 	| { type: "paragraph"; text: string }
-	| { type: "code"; lines: string[] }
+	| { type: "code"; lines: string[]; lang?: string | null }
 	| { type: "quote"; lines: string[] }
 	| { type: "listItem"; depth: number; ordered: boolean; marker: string; text: string }
 	| { type: "hr" }
@@ -64,6 +64,11 @@ export function parseMarkdown(src: string): MdBlock[] {
 		if (/^\s*(```|~~~)/.test(line)) {
 			flushParagraph(paragraph);
 			const fence = line.trim()[0];
+			const lang =
+				line
+					.trim()
+					.replace(/^(```|~~~)/, "")
+					.trim() || null;
 			i++;
 			const codeLines: string[] = [];
 			while (i < lines.length && !(lines[i] ?? "").trimStart().startsWith(fence === "`" ? "```" : "~~~")) {
@@ -71,7 +76,7 @@ export function parseMarkdown(src: string): MdBlock[] {
 				i++;
 			}
 			i++; // 跳过收尾围栏（或 EOF）
-			blocks.push({ type: "code", lines: codeLines });
+			blocks.push({ type: "code", lines: codeLines, lang });
 			continue;
 		}
 		if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
@@ -210,11 +215,15 @@ export function markdownElements(src: string, theme: MdTheme = DEFAULT_MD_THEME)
 				break;
 			}
 			case "code": {
+				const langLabel =
+					block.lang !== undefined && block.lang !== null && block.lang.length > 0
+						? [text({ text: `── ${block.lang} ──`, dim: true })]
+						: [];
 				out.push(
-					box(
-						{ paddingLeft: 1 },
-						block.lines.map((line) => text({ text: line.length > 0 ? line : " ", ...theme.codeBlock })),
-					),
+					box({ paddingLeft: 1 }, [
+						...langLabel,
+						...block.lines.map((line) => text({ text: line.length > 0 ? line : " ", ...theme.codeBlock })),
+					]),
 				);
 				break;
 			}

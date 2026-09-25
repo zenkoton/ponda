@@ -93,8 +93,11 @@ export interface SessionRow {
 export interface ChatEntry {
 	/** 条目序号（含 header 的行号口径，attach 游标对齐） */
 	cursor: number;
-	kind: "user" | "assistant" | "notice" | "error";
+	kind: "user" | "assistant" | "notice" | "error" | "tool";
 	text: string;
+	/** tool 折叠行（04 §5.3）：成败与耗时 */
+	ok?: boolean;
+	durationMs?: number;
 	/** assistant 的思考块（pi 消息 content 里的 thinking 块，折叠展示） */
 	thinking?: string;
 }
@@ -148,6 +151,21 @@ export function parseEntryLine(line: string): ChatEntry | null {
 	};
 	if (entry.type === "session") return null; // header：占游标不渲染
 	if (entry.type === "custom") {
+		if (entry.customType === "ponda.tool") {
+			const t = entry as unknown as {
+				tool?: string;
+				argsDigest?: string;
+				ok?: boolean;
+				durationMs?: number;
+			};
+			return {
+				cursor: 0,
+				kind: "tool",
+				text: `${t.tool ?? "?"} ${(t.argsDigest ?? "").slice(0, 40)}`.trim(),
+				ok: t.ok !== false,
+				durationMs: t.durationMs ?? 0,
+			};
+		}
 		if (entry.customType === "ponda.ended" || entry.customType === "ponda.interrupted") {
 			return {
 				cursor: 0,
@@ -272,6 +290,8 @@ export interface TuiState {
 	sidebarVisible(): boolean;
 	/** 侧栏循环：隐藏 → 会话页 → 文件页 → 隐藏 */
 	cycleSidebar(): void;
+	/** 直接呼出侧栏（可指定页签；/sessions 等命令用） */
+	showSidebar(tab?: LeftTab): void;
 	tabs(): CenterTab[];
 	setTabs(tabs: CenterTab[]): void;
 	activeTabId(): string;
@@ -289,6 +309,12 @@ export interface TuiState {
 	setCompletion(c: CompletionState | null): void;
 	hint(): string;
 	setHint(h: string): void;
+	/** 输入区状态行（04 §5.4）：mode/思考强度/模型/上下文占用 */
+	statusLine(): StatusLine;
+	setStatusLine(s: StatusLine): void;
+	/** 右栏 TODOLIST 段（04 §4.3；daemon todo.read 数据源） */
+	todoBoard(): TodoBoardSummary | null;
+	setTodoBoard(b: TodoBoardSummary | null): void;
 	/** 编辑器为有状态缓冲；rev 信号驱动依赖它的帧重渲染 */
 	readonly editor: PondaEditor;
 	editorRev(): number;
@@ -300,6 +326,20 @@ export interface TuiState {
 	setFileTreeRoot(root: string | null): void;
 	moveTreeCursor(delta: number): void;
 	toggleTreeExpand(relPath: string): void;
+}
+
+export interface StatusLine {
+	mode: string;
+	thinking: string;
+	modelId: string;
+	ctxUsed: number;
+	ctxWindow: number;
+}
+
+export interface TodoBoardSummary {
+	taskId: string;
+	items: { id: string; text: string; status: string }[];
+	revision: number;
 }
 
 export function createTuiState(env: string): TuiState {
@@ -319,6 +359,14 @@ export function createTuiState(env: string): TuiState {
 	const [dialog, setDialog] = createSignal<DialogState>(null);
 	const [completion, setCompletion] = createSignal<CompletionState | null>(null);
 	const [hint, setHint] = createSignal("");
+	const [todoBoard, setTodoBoard] = createSignal<TodoBoardSummary | null>(null);
+	const [statusLine, setStatusLine] = createSignal<StatusLine>({
+		mode: "approve",
+		thinking: "off",
+		modelId: "—",
+		ctxUsed: 0,
+		ctxWindow: 0,
+	});
 	const [editorRev, setEditorRev] = createSignal(0);
 	const bumpEditor = (): void => {
 		setEditorRev((v) => v + 1);
@@ -379,6 +427,10 @@ export function createTuiState(env: string): TuiState {
 				setSidebarVisible(false);
 			}
 		},
+		showSidebar(tab?: LeftTab): void {
+			setSidebarVisible(true);
+			if (tab !== undefined) setLeftTab(tab);
+		},
 		tabs,
 		setTabs,
 		activeTabId,
@@ -399,6 +451,10 @@ export function createTuiState(env: string): TuiState {
 		setCompletion,
 		hint,
 		setHint,
+		statusLine,
+		setStatusLine,
+		todoBoard,
+		setTodoBoard,
 		editor,
 		editorRev,
 		bumpEditor,

@@ -14,6 +14,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { isCredentialReference, saveProviderCredential } from "./auth.ts";
 import { ENV_SUBDIRS, paths, pondaHome } from "./paths.ts";
 import { planRender, renderEnv } from "./render.ts";
 import { EnvNotFoundError, type ResolvedEnv, resolveEnv } from "./resolve.ts";
@@ -34,6 +35,7 @@ export interface CreateEnvOptions {
 	systemPrompt?: string;
 	/** 差量字段（skills/extensions/...），仅写入用户显式声明的部分 */
 	patch?: EnvManifestInput;
+	noRender?: boolean;
 }
 
 export class EnvStore {
@@ -97,6 +99,27 @@ export class EnvStore {
 		renderEnv(this.home, name, res.effective);
 	}
 
+	/** 沿 base 链删除各声明层 manifest 中 provider 的明文 apiKey（doctor 迁移用） */
+	private stripPlaintextApiKeys(name: string): void {
+		const seen = new Set<string>();
+		let n: string | null = name;
+		while (n !== null && !seen.has(n)) {
+			seen.add(n);
+			const m = this.readManifest(n);
+			if (m?.models?.providers !== undefined) {
+				let changed = false;
+				for (const [, v] of Object.entries(m.models.providers)) {
+					if (v !== null && v.apiKey !== undefined && !isCredentialReference(v.apiKey)) {
+						delete v.apiKey;
+						changed = true;
+					}
+				}
+				if (changed) this.saveManifest(m);
+			}
+			n = m?.base ?? (n === "default" ? null : "default");
+		}
+	}
+
 	// —— 全局运行态 state.json ——
 	readState(): PondaState {
 		const file = paths.state(this.home);
@@ -143,7 +166,7 @@ export class EnvStore {
 		const resolved = resolveEnv((n) => (n === opts.name ? input : this.readManifest(n)), opts.name);
 
 		this.writeManifest(opts.name, input);
-		renderEnv(this.home, opts.name, resolved.effective);
+		if (opts.noRender !== true) renderEnv(this.home, opts.name, resolved.effective);
 		return resolved;
 	}
 
@@ -352,6 +375,21 @@ export class EnvStore {
 		for (const name of this.names()) {
 			try {
 				const res = this.resolve(name);
+				// 明文凭据迁移（02 §6.1）：effective 里的明文 apiKey → 本环境 auth.json（0600），
+				// 声明层 manifest 剥离 + 重渲染（models.json 不再含明文）
+				const plain = Object.entries(res.effective.models.providers ?? {}).filter(
+					(d): d is [string, NonNullable<(typeof d)[1]>] =>
+						d[1] !== null && d[1].apiKey !== undefined && !isCredentialReference(d[1].apiKey),
+				);
+				if (plain.length > 0) {
+					for (const [k, v] of plain) saveProviderCredential(this.home, name, k, v.apiKey as string);
+					this.stripPlaintextApiKeys(name);
+					this.rerender(name);
+					report.push({
+						level: "warn",
+						message: `${name}: ${plain.length} 个 provider 的明文 apiKey 已迁移到 envs/${name}/auth.json（0600）`,
+					});
+				}
 				const plan = planRender(this.home, name, res.effective);
 				for (const w of plan.warnings) report.push({ level: "warn", message: `${name}: ${w}` });
 				// 渲染漂移：计划文件与磁盘内容比对

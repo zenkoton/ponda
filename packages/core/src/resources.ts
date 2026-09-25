@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isCredentialReference } from "./auth.ts";
 import { paths } from "./paths.ts";
 import type { EnvStore } from "./store.ts";
 import type { CommandTool, EnvManifestInput, ProviderDef, ResourceKind, ResourceSelector } from "./types.ts";
@@ -262,7 +263,11 @@ export class ResourceStore {
 		const dest = join(this.poolDir("provider"), dirName(providerName, def.api));
 		if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
 		mkdirSync(dest, { recursive: true });
-		writeAtomic(join(dest, "provider.json"), JSON.stringify(def, null, "\t"));
+		// 池是跨环境共享的：明文凭据不入池（环境级 auth.json 由 CLI 侧写入，02 §6.1）；
+		// 引用形式（$ENV/!command）保留，随池共享
+		const safeDef: ProviderDef = { ...def };
+		if (safeDef.apiKey !== undefined && !isCredentialReference(safeDef.apiKey)) delete safeDef.apiKey;
+		writeAtomic(join(dest, "provider.json"), JSON.stringify(safeDef, null, "\t"));
 		const meta: ResourceMeta = {
 			kind: "provider",
 			name: providerName,

@@ -1,0 +1,18 @@
+{
+	"name": "@ponda/tui",
+	"version": "0.1.0",
+	"description": "ponda TUI 运行时：opencode 范式（solid 风格信号 + 声明式组件 + flexbox + cell buffer 差分渲染），替代 pi-tui 依赖（design: docs/design/04-tui.md）",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"test": "node --test test/"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}

@@ -6,9 +6,10 @@ import { afterEach, test } from "node:test";
 import { DaemonCore } from "../../daemon/src/core.ts";
 import { RpcClient } from "../../rpc/src/client.ts";
 import { Methods, type TaskInfo } from "../../rpc/src/index.ts";
-import { PondaTui } from "../../tui/src/ponda/app.ts";
-import { stripAnsi } from "../../tui/src/ponda/view.ts";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { PondaTui } from "../../tui-next/src/app/app.ts";
+import { VirtualTerminal } from "../../tui-next/test/virtual-terminal.ts";
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "");
 
 const cleanups: (() => void)[] = [];
 const cores: DaemonCore[] = [];
@@ -79,7 +80,7 @@ test("TUI 端到端：右栏成果状态 + 契约确认弹窗 + 变更审批弹�
 	);
 	// 右栏 goal 区块
 	assert.ok(
-		has((f) => f.some((l) => l.includes("── goal ──"))),
+		has((f) => f.some((l) => l.includes("goal"))),
 		"右栏 goal 区块",
 	);
 	assert.ok(

@@ -27,7 +27,7 @@ export function newFileTreeState(): FileTreeState {
 }
 
 /** 按展开状态扫描可渲染的树行（上限保护：maxRows） */
-export function scanTree(root: string, expanded: Set<string>, maxRows = 200): FileTreeNode[] {
+export function scanTree(root: string, expanded: ReadonlySet<string>, maxRows = 200): FileTreeNode[] {
 	const out: FileTreeNode[] = [];
 	if (!existsSync(root)) return out;
 	const walk = (dir: string, depth: number): void => {

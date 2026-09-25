@@ -1,14 +1,20 @@
-/** `ponda tui`：三栏读视图（M5 第一批，design: 04-tui.md） */
+/** `ponda tui`：三栏界面（design: 04-tui.md；opencode 范式 TUI 运行时 @ponda/tui） */
 
 import type { EnvStore } from "../../../core/src/store.ts";
 import { ensureDaemon } from "../../../daemon/src/spawn.ts";
-import type { Terminal } from "../../../tui/src/terminal.ts";
+import type { Terminal } from "../../../tui-next/src/terminal.ts";
 import { c } from "../ui.ts";
 import { currentEnv } from "./env.ts";
 
-/** 快照模式用的最小 Terminal（implements pi-tui Terminal，仅收集帧） */
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07/g;
+
+function stripAnsi(s: string): string {
+	return s.replace(ANSI_RE, "");
+}
+
+/** 快照模式用的最小 Terminal（仅收集写出） */
 class SnapshotTerminal implements Terminal {
-	written: string[] = [];
+	readonly written: string[] = [];
 	private readonly cols: number;
 	private readonly rowsV: number;
 
@@ -19,7 +25,6 @@ class SnapshotTerminal implements Terminal {
 
 	start(_onInput: (data: string) => void, _onResize: () => void): void {}
 	stop(): void {}
-	async drainInput(): Promise<void> {}
 	write(data: string): void {
 		this.written.push(data);
 	}
@@ -29,17 +34,6 @@ class SnapshotTerminal implements Terminal {
 	get rows(): number {
 		return this.rowsV;
 	}
-	get kittyProtocolActive(): boolean {
-		return false;
-	}
-	moveBy(_lines: number): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(_title: string): void {}
-	setProgress(_active: boolean): void {}
 }
 
 export async function runTui(store: EnvStore, args: string[], flags: Map<string, string | boolean>): Promise<number> {
@@ -52,7 +46,7 @@ export async function runTui(store: EnvStore, args: string[], flags: Map<string,
 	const preferred = typeof args[0] === "string" ? args[0] : undefined;
 
 	const handle = await ensureDaemon(store.home, env);
-	const { PondaTui } = await import("../../../tui/src/ponda/app.ts");
+	const { PondaTui } = await import("../../../tui-next/src/app/app.ts");
 
 	if (snapshot) {
 		// 无头快照：渲染一帧到 stdout（CI/日志可演示）
@@ -71,23 +65,22 @@ export async function runTui(store: EnvStore, args: string[], flags: Map<string,
 		}
 		await app.stop();
 		const frame = frames[frames.length - 1] ?? [];
-		const { stripAnsi } = await import("../../../tui/src/ponda/view.ts");
 		for (const line of frame) console.log(stripAnsi(line));
 		handle.client.close();
 		return 0;
 	}
 
-	// 交互模式：真终端
+	// 交互模式：真终端（备用屏 + 差分渲染）
 	if (process.stdout.isTTY !== true) {
 		console.error("当前不是 TTY；使用 ponda tui --snapshot 输出一帧，或附加 --env 指定环境。");
 		handle.client.close();
 		return 1;
 	}
-	const { ProcessTerminal } = await import("../../../tui/src/terminal.ts");
+	const { ProcessTerminal } = await import("../../../tui-next/src/terminal.ts");
 	const term = new ProcessTerminal();
+	term.setTitle(`ponda tui · ${env}`);
 	const app = new PondaTui({ env, home: store.home, client: handle.client, terminal: term });
 	await app.start(preferred);
-	console.log(c.dim("（读视图：q 退出 · j/k 滚动 · Tab 切换会话；输入区 M5 第二批）"));
 	await new Promise<void>((resolve) => {
 		const t = setInterval(() => {
 			if (!app.isRunning) {
@@ -96,6 +89,7 @@ export async function runTui(store: EnvStore, args: string[], flags: Map<string,
 			}
 		}, 100);
 	});
+	console.log(c.dim("（ponda tui 已退出；后台会话由 daemon 托管）"));
 	handle.client.close();
 	return 0;
 }

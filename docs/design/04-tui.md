@@ -1,6 +1,6 @@
 # 04 · TUI 交互界面（`ponda tui`）
 
-> readme 的 tui 扩展：三栏布局的终端对话界面。本文给出布局规格、面板行为、弹窗系统、键位与组件映射。TUI 直接改造 fork 内的 pi TUI（00 §1.1，三栏布局并入其渲染循环），进程模型依托 daemon（05 §5）。
+> readme 的 tui 扩展：三栏布局的终端对话界面。本文给出布局规格、面板行为、弹窗系统、键位与组件映射。TUI 由自研运行时 `packages/tui-next`（`@ponda/tui`）实现，采用 **opencode TUI 范式**（solid 风格细粒度信号 + 声明式组件 + flexbox + cell buffer 行差分渲染 + 分层 keymap），不依赖 fork 内的 pi-tui；进程模型依托 daemon（05 §5）。
 
 ## 1. 模块目标与需求映射
 
@@ -21,41 +21,60 @@
 ## 2. 进程与架构
 
 ```
-ponda tui（前台进程，改造自 fork 内 pi 的 TUI：三栏布局并入其渲染循环）
+ponda tui（前台进程，packages/tui-next 自研运行时：opencode 范式渲染循环）
   ├─ 启动：确定环境上下文（--env / 当前激活）→ 确认/懒启动该环境 daemon（05 §5.1）
   ├─ 连接 Unix socket，RPC：session.list/attach/send、permission.respond...
   └─ 本地状态：UI 偏好（栏宽、折叠态、主题）存 ~/.ponda/tui.json
 ```
 
-- fork 收益：三栏布局作为 pi TUI 的**原生布局模式**实现（复用其消息渲染/编辑器/主题体系），而非旁挂应用；`pi` 原有单栏界面仍可用（`ponda pi` 透传）。
+- 范式（对齐 opencode TUI）：状态 = solid 风格信号（`createSignal/createMemo/batch`）；UI = `box/text/rich/modal/scroll` 工厂函数构成的声明式组件树（Node 原生 TS 无 JSX 的工厂替代）；渲染 = 帧级根 effect（依赖的信号变化即整帧重算）→ cell buffer 绘制 → ANSI 行序列化 → 行级差分写终端（备用屏 + 同步输出）；键位 = 模式 → 绑定表 → 命令的分层 keymap；数据 = daemon 轮询/通知在 `batch()` 内落地为信号更新（单次渲染）。昂贵子树（markdown 解析）经 `createMemo`/缓存复用。
 - TUI 崩溃/退出不影响后台任务（agent 存活于 daemon）；重进自动 attach 上次会话。
-- 组件自上而下：`App(VStack[ Header, Main(HStack[LeftPanel, CenterPanel, RightPanel]), StatusBar ])`，弹窗为 Overlay。
+- 组件自上而下：`App(VStack[ Header, Main(HStack[LeftPanel, CenterPanel, RightPanel]), Dock, StatusBar ])`，弹窗为 modal 居中覆盖。
 - 尺寸自适应：终端 < 100 列时右栏折叠为 2 列状态条；< 70 列时左栏收为标签页入口（`Tab` 循环焦点）。
 
 ## 3. 布局总览
 
+默认视图 = opencode 式聚焦对话（侧栏不占位，goal 面板仅任务存在时出现）：
+
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ ponda tui · env: web-dev · model: glm-4.7(think:high) · ctx 23k/200k     │ ← Header
-├───────────────┬──────────────────────────────────────────┬───────────────┤
-│ [会话] [文件]  │  ▶ 标签页: main.md × | chat │ task.md      │  TODOLIST     │
-│ ▾ ~/proj/web  │ ┌──────────────────────────────────────┐ │  ▸ t1 骨架   ░ │
-│   • auth 重构  │ │                                      │ │  ▸ t2 API    ▓ │
-│     12k tok   │ │         对话主体（Markdown）           │ │  ▸ t3 测试    ░ │
-│     running   │ │                                      │ │ ───────────── │
-│ ▸ ~/proj/api  │ │                                      │ │  成果状态      │
-│   • 会话 b …   │ │                                      │ │  d1 ✔ verified│
-│               │ └──────────────────────────────────────┘ │  d2 ◐ in_prog │
-│ [文件] 视图：  │ ┌──────────────────────────────────────┐ │  d3 ○ planned │
-│ ▾ src/        │ │ [sub1 实现者●][sub2 探索者○] ← 子agent │ │ ───────────── │
-│   ▸ auth/     │ ├──────────────────────────────────────┤ │  权限/通知     │
-│   ▸ api/      │ │ @ 引用…  / 命令…          [发送 ⏎]     │ │               │
-│   · main.md   │ │ mode: approve · think: high · 12k ctx │ │               │
-├───────────────┴──┴──────────────────────────────────────┴─┴───────────────┤
-│ env web-dev · sessions 3 (1 running) · all agents: 1.2M tok · $4.31 today │ ← StatusBar
-└──────────────────────────────────────────────────────────────────────────┘
-   左栏(§4)              中栏(§5)                                        右栏(§4.3)
+ ponda web-dev                                                       ◐ 1a2b3c4d
+                                                                        ← Header（双侧）
+                ❯ 帮我重构这个模块                                      ← 用户消息（❯ 前缀）
+
+                ✻ 思考 (2.3k tok)                                      ← 思考折叠（暗淡）
+
+                好的，我先看一下结构……                                   ← assistant markdown
+                # 计划
+                1. 抽接口
+
+                ⠋ 生成中…                                              ← 处理中指示（spinner）
+╭──────────────────────────────────────────────────────────────────────╮
+│ ❯ 输入消息…                                                          │  ← 圆角输入框（常驻焦点）
+╰──────────────────────────────────────────────────────────────────────╯
+ web-dev · 3 会话 · Σ 1.2k tok / $0.03        ⏎ 发送 · esc 导航 · ^x 快捷键  ← Footer（双侧）
 ```
+
+侧栏呼出（`Tab` 空编辑器 / 导航模式 `t` / leader `^x s`）后：
+
+```
+ ponda web-dev                                                       ◐ 1a2b3c4d
+╭──────────────────────────────╮
+│ 会话  3                      │        ❯ 帮我重构这个模块
+│ /w/proj (1)                  │
+│ ● 1a2b3c4d 1.0k ⋙            │        ✻ 思考 (2.3k tok)
+│ /w/api (2)                   │
+│ ◐ 9f8e7d6c 0.4k              │        好的，我先看一下结构……
+│                              │
+│ Σ 1.4k tok · $0.05           │
+╰──────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────╮
+│ ❯                                                              │
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+- 会话/文件侧栏两页循环：隐藏 → 会话 → 文件 → 隐藏（`t` / `^x s`）。
+- goal 面板（右侧圆角框）在有活跃 goal 任务时自动出现（§4.3 成果状态）。
+- daemon `error` 事件渲染为红色 `⚠` 行，处理中显示 spinner，对话流不再静默中断。
 
 ## 4. 左栏与右栏
 
@@ -89,10 +108,10 @@ ponda tui（前台进程，改造自 fork 内 pi 的 TUI：三栏布局并入其
 
 | 能力 | 方案 |
 |---|---|
-| Markdown（标题/列表/引用/表格） | pi-tui Markdown 组件原生 |
-| 代码块语法高亮 | pi-tui（主题 syntax 色板随环境主题） |
-| 图片 | pi-tui Kitty/iTerm2 协议；不支持时占位符 `[img: name WxH]` |
-| Mermaid | pi-tui 内置支持（降级为代码块） |
+| Markdown（标题/列表/引用/表格） | `@ponda/tui` 自研 markdown 渲染器（`markdownElements`：块解析 + 行内样式段 + 富文本流式换行） |
+| 代码块语法高亮 | 后续：tui-next markdown 行内 code/代码块主题色板（随环境主题） |
+| 图片 | 后续：Kitty/iTerm2 协议（tui-next paint 层扩展）；不支持时占位符 `[img: name WxH]` |
+| Mermaid | 降级为代码块 |
 | 数学公式 | 两级：行内/简单公式 Unicode 近似渲染（x²、√、∑ 等）；复杂公式渲染为高对比等宽块 + 提示（开放问题 Q4，00 §9） |
 
 ### 5.3 折叠交互
@@ -130,34 +149,54 @@ ponda tui（前台进程，改造自 fork 内 pi 的 TUI：三栏布局并入其
 
 弹窗期间后台流继续（事件入队列，关闭后补渲染）；同一时刻多个待确认按队列逐个处理，右栏显示排队计数。
 
-## 7. 键位总表（默认，可经 `~/.ponda/tui.json` 改）
+## 7. 键位总表（opencode 式：默认输入焦点 + Esc 导航 + `Ctrl-X` leader）
 
-| 键 | 焦点区 | 动作 |
+**输入模式（默认）**——打开即打字：
+
+| 键 | 动作 |
+|---|---|
+| 可打印字符 / 粘贴 | 插入输入框 |
+| `Enter` | 发送（有补全时先接受补全）；行尾 `\` 或 `Alt-Enter` 换行 |
+| `Tab` | 接受 @/ / 补全；编辑器为空时呼出/切换会话侧栏 |
+| `↑/↓` | 补全候选切换 / 编辑器行间移动 |
+| `Esc` | 关闭补全；再按进入导航模式 |
+| `Ctrl-C` | 退出 TUI（daemon 存活） |
+
+**leader（`Ctrl-X` 后单键，输入中也可导航）**：
+
+| 键 | 动作 |
+|---|---|
+| `Ctrl-X j` / `k` | 滚动对话流 |
+| `Ctrl-X s` | 会话/文件侧栏循环（隐藏→会话→文件→隐藏） |
+| `Ctrl-X x` / `[` / `]` | 关闭 / 环切中栏标签页 |
+| `Ctrl-X Tab` | 下一会话 |
+| `Ctrl-X m` / `1..9` | 切回 main / 切换子 agent 视图 |
+| `Ctrl-X q` | 退出 |
+
+**导航模式（Esc 进入；任意可打印字符回到输入并插入）**：
+
+| 键 | 动作 |
+|---|---|
+| `j` / `k` | 滚动对话流（侧栏文件页时移动树光标） |
+| `t` | 侧栏循环；`Enter` 打开侧栏选中文件 |
+| `[` / `]` / `x` | 标签页环切 / 关闭 |
+| `Tab` | 下一会话 |
+| `m` / `1..9` | 主会话 / 子 agent 视图 |
+| `q` / `Ctrl-C` | 退出 |
+
+## 8. 组件与 @ponda/tui 映射
+
+| ponda 组件 | @ponda/tui（tui-next）基件 | 备注 |
 |---|---|---|
-| `Tab` / `Shift-Tab` | 全局 | 左栏页签 / 焦点区循环（左→中→右） |
-| `Ctrl-Tab`、`Ctrl-1..9` | 中栏 | 标签页切换 |
-| `Ctrl-P` | 全局 | 命令面板（所有动作的模糊搜索入口） |
-| `Ctrl-N` | 全局 | 新会话 |
-| `Ctrl-M` | 输入区 | 权限模式切换 |
-| `Ctrl-T` | 输入区 | 思考强度切换 |
-| `Enter` | 各区 | 展开/打开/发送（按区） |
-| `d` / `f` | 左栏会话 | 删除 / fork |
-| `q` | 弹窗外 | 关闭当前标签页（输入框为空时） |
-| `Ctrl-C`×2 | 全局 | 退出 TUI（daemon 存活） |
+| App/Header/StatusBar | `box`（column/row）+ `rich`（多样式行） | 根 effect 帧循环 + 行差分写出 |
+| 左栏会话/文件树 | `box` + `rich`/`text` 列表（超出面板自动裁剪） | 树数据 `app/files.ts` |
+| 中栏消息流 | `scroll`（offset 距底部行数：0 = 跟随底部）+ `markdown` | markdown 解析缓存 |
+| 输入区 | `box` + `rich`（`PondaEditor` 缓冲 + rev 信号驱动重渲染） | @ 与 / 的补全层自研（dock 内弹层） |
+| 标签页行 / 子 agent 条 / chips | `rich`（单行多样式段） | |
+| 折叠块 | `rich` 折叠行 + 惰性展开 | 展开内容缓存 |
+| 弹窗 | `modal`（固定宽居中覆盖，不参与基础布局） | §6 |
 
-## 8. 组件与 pi-tui 映射
-
-| ponda 组件 | pi-tui 基件 | 备注 |
-|---|---|---|
-| App/Header/StatusBar | VStack + 自定义 render | 差分渲染、同步输出由 pi-tui 保证 |
-| 左栏会话/文件树 | ScrollView + 树组件（自研，组合 SelectList 交互） | 虚拟滚动支持长列表 |
-| 中栏消息流 | ScrollView + Markdown | 增量 append，自动跟随底部（用户上滚即停） |
-| 输入区 | Editor | @ 与 / 的补全层自研（Overlay） |
-| 标签页行 / 子 agent 条 / chips | HStack 自定义 | |
-| 折叠块 | 自定义（.CollapsedRow + 惰性展开） | 展开内容缓存 |
-| 弹窗 | Overlay + SelectList | §6 |
-
-新增组件落在 fork 的 tui 包补丁区域内（`PATCHES.md` 登记），均为纯 render + 事件函数，可用 pi-tui 的 VirtualTerminal 做无头快照测试。
+新增组件均为纯函数（返回元素树）+ 事件动作（改信号），可用 `renderStateFrame` 无头渲染做快照测试。
 
 ## 9. 边界情况与开放问题
 

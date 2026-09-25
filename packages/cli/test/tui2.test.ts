@@ -6,15 +6,16 @@ import { afterEach, test } from "node:test";
 import { DaemonCore } from "../../daemon/src/core.ts";
 import { RpcClient } from "../../rpc/src/client.ts";
 import { Methods } from "../../rpc/src/index.ts";
-import { PondaTui } from "../../tui/src/ponda/app.ts";
-import { computeCompletion, renderCompletionPopup } from "../../tui/src/ponda/completion.ts";
-import { compositeDialog, type MergeConfirmState } from "../../tui/src/ponda/dialogs.ts";
-import { PondaEditor } from "../../tui/src/ponda/editor.ts";
-import { listFileCandidates, newFileTreeState, readFilePreview, scanTree } from "../../tui/src/ponda/files.ts";
-import { closeTab, cycleTab, newReadModel, openFileTab } from "../../tui/src/ponda/model.ts";
-import { stripAnsi } from "../../tui/src/ponda/view.ts";
-import type { Terminal } from "../../tui/src/terminal.ts";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { PondaTui } from "../../tui-next/src/app/app.ts";
+import { computeCompletion, renderCompletionPopup } from "../../tui-next/src/app/completion.ts";
+import { renderStateFrame } from "../../tui-next/src/app/components.ts";
+import { PondaEditor } from "../../tui-next/src/app/editor.ts";
+import { listFileCandidates, readFilePreview, scanTree } from "../../tui-next/src/app/files.ts";
+import { type CenterTab, closeTab, createTuiState, cycleTab, openFileTab } from "../../tui-next/src/app/state.ts";
+import type { Terminal } from "../../tui-next/src/terminal.ts";
+import { VirtualTerminal } from "../../tui-next/test/virtual-terminal.ts";
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "");
 
 const cleanups: (() => void)[] = [];
 const cores: DaemonCore[] = [];
@@ -103,21 +104,21 @@ test("scanTree/listFileCandidates/readFilePreview", () => {
 	writeFileSync(join(ws, "src", "sub", "b.md"), "# B\n");
 	writeFileSync(join(ws, "root.txt"), "r\n");
 
-	const st = newFileTreeState();
-	let nodes = scanTree(ws, st.expanded);
+	const expanded = new Set<string>();
+	let nodes = scanTree(ws, expanded);
 	assert.deepEqual(
 		nodes.map((n) => n.relPath),
 		["root.txt", "src"],
 		"默认折叠仅顶层，node_modules 被忽略",
 	);
-	st.expanded.add("src");
-	nodes = scanTree(ws, st.expanded);
+	expanded.add("src");
+	nodes = scanTree(ws, expanded);
 	assert.deepEqual(
 		nodes.map((n) => n.relPath),
 		["root.txt", "src", "src/a.ts", "src/sub"],
 	);
-	st.expanded.add("src/sub");
-	nodes = scanTree(ws, st.expanded);
+	expanded.add("src/sub");
+	nodes = scanTree(ws, expanded);
 	assert.ok(nodes.some((n) => n.relPath === "src/sub/b.md"));
 
 	const cands = listFileCandidates(ws);
@@ -131,33 +132,38 @@ test("scanTree/listFileCandidates/readFilePreview", () => {
 	assert.equal(pm.markdown, true);
 });
 
-// —— 弹窗 ——
+// —— 弹窗（modal 居中覆盖帧）——
 
-test("compositeDialog：权限/合并弹窗居中覆盖帧", () => {
-	const frame = Array.from({ length: 24 }, (_, i) => `row-${i}`.padEnd(100));
-	const withDialog = compositeDialog(frame, {
+test("renderStateFrame：权限/合并弹窗居中覆盖帧", () => {
+	const state = createTuiState("web");
+	const withDialog = renderStateFrame(state, 100, 24).length; // 基线行数
+	state.setDialog({
 		kind: "permission",
 		requestId: "p1",
 		privilege: "write",
 		reason: "写工作区外文件 /etc/hosts",
 		detail: { tool: "write", targetPath: "/etc/hosts", mode: "C" },
 	});
-	assert.equal(withDialog.length, frame.length);
-	assert.ok(withDialog.some((l) => l.includes("权限申请：write")));
-	assert.ok(withDialog.some((l) => l.includes("/etc/hosts")));
-	assert.ok(withDialog.some((l) => l.includes("[a] 总是允许")));
-	assert.ok(withDialog.some((l) => l.includes("┌")));
-	assert.ok(withDialog.some((l) => l.includes("└")));
+	const lines = renderStateFrame(state, 100, 24).map(stripAnsi);
+	assert.equal(lines.length, withDialog);
+	assert.ok(lines.some((l) => l.includes("权限申请：write")));
+	assert.ok(lines.some((l) => l.includes("/etc/hosts")));
+	assert.ok(lines.some((l) => l.includes("[a] 总是允许")));
+	assert.ok(
+		lines.some((l) => l.includes("╭")),
+		"圆角弹窗边框",
+	);
+	assert.ok(lines.some((l) => l.includes("╰")));
 
-	const merge: MergeConfirmState = {
+	state.setDialog({
 		kind: "merge",
 		files: [
 			{ path: "src/a.ts", status: "M" },
 			{ path: "src/new.ts", status: "A" },
 		],
 		note: "worktree wt-1 结算",
-	};
-	const m = compositeDialog(frame, merge);
+	});
+	const m = renderStateFrame(state, 100, 24).map(stripAnsi);
 	assert.ok(m.some((l) => l.includes("src/a.ts")));
 	assert.ok(m.some((l) => l.includes("wt-1")));
 	assert.ok(m.some((l) => l.includes("[Enter] apply")));
@@ -165,26 +171,34 @@ test("compositeDialog：权限/合并弹窗居中覆盖帧", () => {
 
 // —— 页签模型 ——
 
-test("openFileTab/closeTab/cycleTab", () => {
-	const m = newReadModel("web");
-	openFileTab(m, "/w/a.ts", "a.ts");
-	openFileTab(m, "/w/b.md", "b.md");
-	assert.equal(m.centerTabs.length, 3);
-	assert.equal(m.activeTabId, "file:/w/b.md");
-	openFileTab(m, "/w/a.ts", "a.ts"); // 已存在 → 激活不重复
-	assert.equal(m.centerTabs.length, 3);
-	assert.equal(m.activeTabId, "file:/w/a.ts");
-	cycleTab(m, 1);
-	assert.equal(m.activeTabId, "file:/w/b.md");
-	cycleTab(m, 1); // 回到 chat
-	assert.equal(m.activeTabId, "chat");
-	closeTab(m, "file:/w/a.ts");
-	assert.equal(m.centerTabs.length, 2);
-	const chat = m.centerTabs[0];
+test("openFileTab/closeTab/cycleTab（纯函数）", () => {
+	let tabs: CenterTab[] = [{ id: "chat", kind: "chat" }];
+	tabs = openFileTab(tabs, "/w/a.ts", "a.ts");
+	tabs = openFileTab(tabs, "/w/b.md", "b.md");
+	assert.equal(tabs.length, 3);
+	let active = "file:/w/b.md";
+	tabs = openFileTab(tabs, "/w/a.ts", "a.ts"); // 已存在 → 不重复
+	assert.equal(tabs.length, 3);
+	active = "file:/w/a.ts";
+	active = cycleTab(tabs, active, 1);
+	assert.equal(active, "file:/w/b.md");
+	active = cycleTab(tabs, active, 1); // 回到 chat
+	assert.equal(active, "chat");
+	const closedInactive = closeTab(tabs, active, "file:/w/a.ts");
+	tabs = closedInactive.tabs;
+	assert.equal(tabs.length, 2);
+	assert.equal(closedInactive.activeId, "chat", "关闭非激活页不改激活页");
+	const chat = tabs[0];
 	assert.ok(chat?.kind === "chat");
-	closeTab(m, chat.id); // 主会话页不可关（忽略语义）
-	assert.equal(m.centerTabs.length, 2);
-	assert.equal(m.activeTabId, "chat");
+	const closedChat = closeTab(tabs, "chat", chat.id); // 主会话页不可关（忽略语义）
+	assert.equal(closedChat.tabs.length, 2);
+	assert.equal(closedChat.activeId, "chat");
+	tabs = openFileTab(tabs, "/w/c.ts", "c.ts");
+	active = cycleTab(tabs, "file:/w/b.md", 1);
+	assert.equal(active, "file:/w/c.ts");
+	const closed = closeTab(tabs, active, active); // 关闭激活页 → 回退到前一页（b.md）
+	assert.equal(closed.tabs.length, 2);
+	assert.equal(closed.activeId, "file:/w/b.md");
 });
 
 // —— 端到端：输入区/补全/发送/页签/弹窗 ——
@@ -222,13 +236,13 @@ test("PondaTui 交互端到端：输入、@补全、发送、文件页签、权�
 		for (let i = 0; i < ms / 20 && !has(pred); i++) await new Promise((r) => setTimeout(r, 20));
 	};
 
-	// 输入模式 + 编辑器内容入帧
+	// 默认输入焦点：直接打字即入帧（圆角输入框 + ❯ 前缀 + ▏光标）
 	await waitFrame(() => true);
 	app.handleInput("h");
 	app.handleInput("i");
-	await waitFrame((f) => f.some((l) => l.includes("❯▏hi")));
+	await waitFrame((f) => f.some((l) => l.includes("❯ hi▏")));
 	assert.ok(
-		has((f) => f.some((l) => l.includes("❯▏hi"))),
+		has((f) => f.some((l) => l.includes("❯ hi▏"))),
 		"编辑器内容入帧",
 	);
 	app.handleInput("\x7f");
@@ -247,12 +261,14 @@ test("PondaTui 交互端到端：输入、@补全、发送、文件页签、权�
 		`接受候选：${app.editor.text}`,
 	);
 	app.handleInput(" ");
-	app.handleInput("\x1b"); // 退出输入模式
+	app.handleInput("\x1b"); // Esc → 导航模式
 	app.editor.clear(); // 清空本段演示输入（后续发送阶段从空开始）
 
-	// 左栏文件页签 → 打开文件 → 中栏标签页内容
+	// 侧栏两段切换：会话页 → 文件页 → Enter 打开文件（中栏标签页）
 	app.handleInput("t");
-	await waitFrame((f) => f.some((l) => l.includes("[文件]") && l.includes("▸ a.ts") === false && l.includes(" a.ts")));
+	await waitFrame((f) => f.some((l) => l.includes("会话")));
+	app.handleInput("t");
+	await waitFrame((f) => f.some((l) => l.includes("文件")));
 	app.handleInput("\r"); // 打开选中文件（a.ts，行首）
 	await waitFrame((f) => f.some((l) => l.includes("export const x = 1")));
 	assert.equal(app.model.activeTabId, `file:${ws}/a.ts`);
@@ -322,55 +338,30 @@ class CountingTerminal implements Terminal {
 	constructor(inner: Terminal) {
 		this.inner = inner;
 	}
+
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inner.start(onInput, onResize);
 	}
+
 	stop(): void {
 		this.inner.stop();
 	}
-	async drainInput(maxMs?: number, idleMs?: number): Promise<void> {
-		await this.inner.drainInput(maxMs, idleMs);
-	}
+
 	write(data: string): void {
 		this.bytes += data.length;
 		this.inner.write(data);
 	}
+
 	get columns(): number {
 		return this.inner.columns;
 	}
+
 	get rows(): number {
 		return this.inner.rows;
 	}
-	get kittyProtocolActive(): boolean {
-		return this.inner.kittyProtocolActive;
-	}
-	moveBy(lines: number): void {
-		this.inner.moveBy(lines);
-	}
-	hideCursor(): void {
-		this.inner.hideCursor();
-	}
-	showCursor(): void {
-		this.inner.showCursor();
-	}
-	clearLine(): void {
-		this.inner.clearLine();
-	}
-	clearFromCursor(): void {
-		this.inner.clearFromCursor();
-	}
-	clearScreen(): void {
-		this.inner.clearScreen();
-	}
-	setTitle(title: string): void {
-		this.inner.setTitle(title);
-	}
-	setProgress(active: boolean): void {
-		this.inner.setProgress(active);
-	}
 }
 
-test("差分渲染：单字符变更的写出量远小于整帧（TuiMainScreen diff）", async () => {
+test("差分渲染：单字符变更的写出量远小于整帧（Screen 行差分）", async () => {
 	const home = newDir();
 	const core = new DaemonCore({ home, env: "web" });
 	cores.push(core);

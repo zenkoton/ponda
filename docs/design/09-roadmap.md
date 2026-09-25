@@ -43,9 +43,10 @@ M0 脚手架
 - 范围：daemon 进程模型与 RPC（05 §5.3 接口全量）、attach/detach、后台存活与通知、崩溃恢复（interrupted 标记）、todolist 工具与事件、CLI 侧 `ponda goal ls/status`（先无 goal 引擎）、`ponda todo ls`。
 - 验收：TUI 未就绪前用 CLI + `pi --mode rpc` 冒烟：会话切走后任务继续、通知可达、daemon 重启后 `goal resume` 语义正确（基于已有 envelope 或标记 interrupted）。
 
-### M5 · TUI（~2 周，改造 fork 内 pi TUI；可与 M6 部分并行）
+### M5 · TUI（~2 周，自研运行时 @ponda/tui【opencode 范式】；可与 M6 部分并行）
 
-- 范围：三栏布局全量（04 §4/§5）、标签页系统、渲染管线（markdown/高亮/图片/公式一级方案）、思考与子步骤折叠、@ 引用与 / 命令补全、模式/模型/思考强度切换、子 agent 切换条（数据接口先于 swarm 落地）、弹窗系统（权限/合并/成果确认/变更审批）、键位与命令面板、无头快照测试（VirtualTerminal）。
+- 范围：三栏布局全量（04 §4/§5）、标签页系统、渲染管线（markdown/高亮/图片/公式一级方案）、思考与子步骤折叠、@ 引用与 / 命令补全、模式/模型/思考强度切换、子 agent 切换条（数据接口先于 swarm 落地）、弹窗系统（权限/合并/成果确认/变更审批）、键位与命令面板、无头快照测试（renderStateFrame）。
+- 实施记录：原方案为改造 fork 内 pi TUI（TuiMainScreen 渲染根）；2026-09 重构为 `packages/tui-next`（`@ponda/tui`）：solid 风格信号 + 声明式组件 + flexbox + cell buffer 行差分 + 分层 keymap（04 §2/§8），不再依赖 pi-tui（PATCHES P2）。
 - 验收：04 §3 ASCII 图的全部交互逐条可演示；TUI 崩溃不中断后台任务；<100 列降级布局可用。
 
 ### M6 · Goal 模式 + 状态描述与确认（~2 周）

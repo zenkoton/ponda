@@ -33,11 +33,26 @@ export interface SkillStateBinding {
 	parseStatePatch: (replyText: string) => { patch?: Record<string, unknown | null>; errors: string[] };
 }
 
+export interface ToolGuard {
+	/** 工具调用前拦截（03 §7.1：路由/重写/拒绝） */
+	beforeToolCall?: (call: { name: string; arguments: Record<string, unknown> }) => {
+		allowed: boolean;
+		reason: string;
+		rewritten?: Record<string, unknown>;
+	};
+	/** 工具调用后记录（telemetry/审计） */
+	afterToolCall?: (
+		call: { name: string; arguments: Record<string, unknown> },
+		result: { ok: boolean; durationMs: number },
+	) => void;
+}
+
 export class PiAgentLoop implements AgentLoop {
 	readonly name = "pi";
 	private readonly agent: Agent;
 	private readonly faux?: FauxProviderRegistration;
 	private skillState: SkillStateBinding | null = null;
+	private toolGuard: ToolGuard | null = null;
 
 	constructor(opts: PiLoopOptions) {
 		this.faux = opts.faux;
@@ -59,6 +74,32 @@ export class PiAgentLoop implements AgentLoop {
 	/** P3：绑定 skill-state（goal 任务经此切换到 (P, Σ, O) 上下文协议） */
 	bindSkillState(binding: SkillStateBinding): void {
 		this.skillState = binding;
+	}
+
+	/** sandbox-guard：绑定工具守卫（03 §7.1 路由/重写/拒绝） */
+	bindToolGuard(guard: ToolGuard): void {
+		this.toolGuard = guard;
+		this.agent.beforeToolCall = async (context) => {
+			if (this.toolGuard?.beforeToolCall === undefined) return undefined;
+			const decision = this.toolGuard.beforeToolCall({
+				name: context.toolCall.name,
+				arguments: (context.args ?? {}) as Record<string, unknown>,
+			});
+			if (!decision.allowed) {
+				return { action: "block", reason: decision.reason };
+			}
+			if (decision.rewritten !== undefined) {
+				return { action: "continue", arguments: decision.rewritten };
+			}
+			return undefined;
+		};
+		this.agent.afterToolCall = async (context) => {
+			this.toolGuard?.afterToolCall?.(
+				{ name: context.toolCall.name, arguments: (context.args ?? {}) as Record<string, unknown> },
+				{ ok: true, durationMs: 0 },
+			);
+			return undefined;
+		};
 	}
 
 	async process(input: AgentTurnInput): Promise<AgentTurnResult> {

@@ -193,6 +193,24 @@ export async function runEnv(
 			return 0;
 		}
 
+		case "freeze": {
+			const name = positional[0];
+			if (!name) return usageError("ponda env freeze <name>");
+			requireEnv(store, name);
+			const res = store.resolve(name);
+			// 快照 effective 配置为独立 manifest（切断继承，design: 01 §3.2）
+			const frozen = JSON.parse(JSON.stringify(res.effective)) as typeof res.effective;
+			frozen.name = name;
+			delete (frozen as { base?: string }).base;
+			frozen.updatedAt = new Date().toISOString();
+			const file = require("node:fs") as { writeFileSync(p: string, d: string, e: string): void };
+			// biome-ignore lint: 冻结操作直接覆写 manifest
+			store.saveManifest(frozen);
+			store.rerender(name);
+			console.log(c.green("✓"), `环境 ${name} 已冻结（继承链切断，effective 配置固化为独立 manifest）`);
+			return 0;
+		}
+
 		case "rename": {
 			const [oldName, newName] = positional;
 			if (!oldName || !newName) return usageError("ponda env rename <old> <new>");

@@ -23,6 +23,8 @@ import { TaskRuntime } from "./goal.ts";
 import * as piLoopModule from "./pi-loop.ts";
 import { SessionManager } from "./sessions.ts";
 import { MAIN_CELL_ID, SwarmRuntime } from "./swarm.ts";
+import { DaemonTelemetry } from "./telemetry.ts";
+import { TodoRuntime } from "./todo.ts";
 
 interface DaemonStateFile {
 	env: string;
@@ -66,6 +68,8 @@ export class DaemonCore {
 	readonly tasks: TaskRuntime;
 	readonly swarm: SwarmRuntime;
 	readonly server: RpcServer;
+	readonly telemetry: DaemonTelemetry;
+	readonly todos: TodoRuntime;
 	private readonly startedAt = new Date().toISOString();
 	private lastActivity = Date.now();
 	private idleTimer: ReturnType<typeof setInterval> | null = null;
@@ -94,12 +98,17 @@ export class DaemonCore {
 		this.swarm.setEventSink((event) => {
 			this.server.broadcast(Notifications.swarmEvents, { event });
 		});
+		this.telemetry = new DaemonTelemetry({ home: opts.home, env: opts.env });
+		this.todos = new TodoRuntime();
 		this.server = new RpcServer((req, conn) => this.dispatch(req.method, req.params ?? {}, conn));
 		this.server.onConnectionChange = (conn, up) => {
 			if (!up) this.sessions.dropConn(conn.id);
 		};
 		this.sessions.onEvent = (sessionId, event: SessionEvent, filter) => {
 			this.server.broadcast(Notifications.sessionEvents, { sessionId, event }, (conn) => filter(conn.id));
+			if (event.kind === "entry") {
+				this.telemetry.emit("message", { line: event.line.slice(0, 500) }, { sessionId });
+			}
 			this.touch();
 		};
 	}
@@ -194,6 +203,7 @@ export class DaemonCore {
 		}
 		this.pendingPermissions.clear();
 		await this.server.close();
+		this.telemetry.close();
 		this.onExit?.(code);
 	}
 
@@ -215,6 +225,7 @@ export class DaemonCore {
 
 			case Methods.sessionNew: {
 				const r = this.sessions.new({ workspace: strOrNull(params.workspace) });
+				this.telemetry.emit("session.start", { workspace: params.workspace }, { sessionId: r.sessionId });
 				this.writeState();
 				return r;
 			}
@@ -299,6 +310,20 @@ export class DaemonCore {
 				return mod.refreshWiki(requireStr(params.workspace), {
 					supplier: () => (typeof params.moduleBody === "string" ? params.moduleBody : null) ?? null,
 				});
+			}
+
+			case Methods.todoWrite: {
+				const taskId = requireStr(params.taskId);
+				const ops = (Array.isArray(params.ops) ? params.ops : []) as never[];
+				const r = this.todos.write(taskId, ops, {
+					expectedRevision: typeof params.revision === "number" ? params.revision : undefined,
+				});
+				this.server.broadcast(Notifications.todoEvents, { taskId, diff: r.diff, revision: r.board.revision });
+				return r.board;
+			}
+
+			case Methods.todoRead: {
+				return this.todos.read(requireStr(params.taskId));
 			}
 
 			case Methods.permissionRespond: {

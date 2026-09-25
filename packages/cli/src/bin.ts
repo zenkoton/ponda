@@ -5,6 +5,7 @@
  */
 import { EnvNotFoundError, EnvStore, pondaHome, RESERVED_WORDS, ValidationError } from "../../core/src/index.ts";
 import { runDaemon } from "./commands/daemon.ts";
+import { runDataset } from "./commands/dataset.ts";
 import { runEnv } from "./commands/env.ts";
 import { runGoal } from "./commands/goal.ts";
 import { runHook } from "./commands/hook.ts";
@@ -14,6 +15,7 @@ import { makeResContext, type ResourceGroup, runHistory, runMemory, runResourceG
 import { runSandbox } from "./commands/sandbox.ts";
 import { runStats } from "./commands/stats.ts";
 import { runTui } from "./commands/tui.ts";
+import { runWiki } from "./commands/wiki.ts";
 import { c } from "./ui.ts";
 
 const VERSION = "0.1.0";
@@ -174,6 +176,12 @@ async function main(): Promise<number> {
 			return await runGoal(store, rest[0] ?? "", rest.slice(1), flags, json);
 		case "stats":
 			return await runStats(store, rest[0] ?? "", rest.slice(1), flags, json);
+		case "wiki": {
+			const ws = typeof flags.get("workspace") === "string" ? (flags.get("workspace") as string) : process.cwd();
+			return await runWiki(ws, rest[0] ?? "", rest.slice(1), flags, json);
+		}
+		case "dataset":
+			return await runDataset(store, rest[0] ?? "", rest.slice(1), flags, json);
 		case "skills":
 		case "tools":
 		case "extensions":

@@ -70,6 +70,8 @@ export const Methods = {
 	wikiUpdate: "wiki.update",
 	wikiBuild: "wiki.build",
 	wikiRefresh: "wiki.refresh",
+	todoWrite: "todo.write",
+	todoRead: "todo.read",
 } as const;
 
 /** daemon → 客户端的通知（session.events 流等） */
@@ -78,7 +80,25 @@ export const Notifications = {
 	permissionRequest: "permission.request",
 	taskEvents: "task.events",
 	swarmEvents: "swarm.events",
+	todoEvents: "todo.events",
 } as const;
+
+// —— todolist（design: 05-runtime.md §2）——
+
+export interface TodoItem {
+	id: string;
+	parent: string | null;
+	text: string;
+	status: "pending" | "in_progress" | "done" | "blocked" | "cancelled";
+	blockedReason?: string;
+	refs?: { deliverable?: string; sandboxActivity?: string };
+}
+
+export interface TodoBoard {
+	taskId: string;
+	items: TodoItem[];
+	revision: number;
+}
 
 // —— agent swarm（design: 05-runtime.md §6） ——
 

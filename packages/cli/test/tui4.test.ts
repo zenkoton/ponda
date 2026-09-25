@@ -7,9 +7,10 @@ import { afterEach, test } from "node:test";
 import { DaemonCore } from "../../daemon/src/core.ts";
 import { RpcClient } from "../../rpc/src/client.ts";
 import { Methods, type SwarmCellInfo, type SwarmStatus } from "../../rpc/src/index.ts";
-import { PondaTui } from "../../tui/src/ponda/app.ts";
-import { stripAnsi } from "../../tui/src/ponda/view.ts";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { PondaTui } from "../../tui-next/src/app/app.ts";
+import { VirtualTerminal } from "../../tui-next/test/virtual-terminal.ts";
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "");
 
 const cleanups: (() => void)[] = [];
 const cores: DaemonCore[] = [];
@@ -72,7 +73,8 @@ test("TUI：子 agent 切换条 + 数字键切换视图 + 插话入信箱 + m �
 		"chips 渲染",
 	);
 
-	// 数字键 1：切到 cell 会话视图（中栏显示其 brief 的会话内容）
+	// 数字键 1：切到 cell 会话视图（先 Esc 进导航模式——默认焦点在输入框）
+	app.handleInput("\x1b");
 	app.handleInput("1");
 	await waitFrame((f) => f.some((l) => l.includes("echo(2): 实现导出")));
 	assert.equal(app.model.swarm.selectedCellId, c1.cellId);

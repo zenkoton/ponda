@@ -7,19 +7,18 @@ import { paths } from "../../core/src/paths.ts";
 import { DaemonCore } from "../../daemon/src/core.ts";
 import { RpcClient } from "../../rpc/src/client.ts";
 import { Methods } from "../../rpc/src/index.ts";
-import { PondaTui } from "../../tui/src/ponda/app.ts";
-import { PondaEditor } from "../../tui/src/ponda/editor.ts";
-import { newFileTreeState } from "../../tui/src/ponda/files.ts";
+import { PondaTui } from "../../tui-next/src/app/app.ts";
+import { renderStateFrame } from "../../tui-next/src/app/components.ts";
 import {
-	applySessionList,
+	applySessionListRows,
+	createTuiState,
 	extractContent,
 	groupByWorkspace,
-	newReadModel,
 	pickNextSession,
-	pushEntryLine,
-} from "../../tui/src/ponda/model.ts";
-import { renderFrame, stripAnsi } from "../../tui/src/ponda/view.ts";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+} from "../../tui-next/src/app/state.ts";
+import { VirtualTerminal } from "../../tui-next/test/virtual-terminal.ts";
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "");
 
 const cleanups: (() => void)[] = [];
 function newHome(): string {
@@ -35,17 +34,15 @@ afterEach(async () => {
 const cores: DaemonCore[] = [];
 const apps: { stop(): Promise<void> }[] = [];
 
-// —— 视图模型 ——
+// —— 视图状态 ——
 
-test("pushEntryLine：user/assistant(thinking)/notice 解析与游标口径", () => {
-	const m = newReadModel("web");
-	pushEntryLine(m, JSON.stringify({ type: "session", id: "s1", cwd: "/w" })); // header：占游标
-	pushEntryLine(
-		m,
+test("appendEntryLine：user/assistant(thinking)/notice 解析与游标口径", () => {
+	const state = createTuiState("web");
+	state.appendEntryLine(JSON.stringify({ type: "session", id: "s1", cwd: "/w" })); // header：占游标
+	state.appendEntryLine(
 		JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "帮我重构" }] } }),
 	);
-	pushEntryLine(
-		m,
+	state.appendEntryLine(
 		JSON.stringify({
 			type: "message",
 			message: {
@@ -57,15 +54,15 @@ test("pushEntryLine：user/assistant(thinking)/notice 解析与游标口径", ()
 			},
 		}),
 	);
-	pushEntryLine(m, JSON.stringify({ type: "custom", customType: "ponda.ended" }));
-	assert.equal(m.entrySeq, 4);
+	state.appendEntryLine(JSON.stringify({ type: "custom", customType: "ponda.ended" }));
+	assert.equal(state.entrySeq(), 4);
 	assert.deepEqual(
-		m.entries.map((e) => e.kind),
+		state.entries().map((e) => e.kind),
 		["user", "assistant", "notice"],
 	);
-	assert.equal(m.entries[1]?.thinking, "先看模块结构");
-	assert.equal(m.entries[1]?.text, "# 计划\n分三步");
-	assert.ok(m.entries[2]?.text.includes("ended"));
+	assert.equal(state.entries()[1]?.thinking, "先看模块结构");
+	assert.equal(state.entries()[1]?.text, "# 计划\n分三步");
+	assert.ok(state.entries()[2]?.text.includes("ended"));
 });
 
 test("extractContent：字符串与块数组两形态", () => {
@@ -83,8 +80,7 @@ test("extractContent：字符串与块数组两形态", () => {
 });
 
 test("groupByWorkspace/pickNextSession", () => {
-	const m = newReadModel("web");
-	applySessionList(m, [
+	const rows = applySessionListRows([
 		{
 			sessionId: "b1",
 			workspace: "/w/a",
@@ -116,40 +112,39 @@ test("groupByWorkspace/pickNextSession", () => {
 			entryCount: 1,
 		},
 	]);
-	const groups = groupByWorkspace(m.sessions);
+	const groups = groupByWorkspace(rows);
 	assert.deepEqual(
 		groups.map((g) => g.workspace),
 		["(no workspace)", "/w/a", "/w/b"],
 	);
-	m.currentId = "b1";
-	assert.equal(pickNextSession(m), "a1");
+	assert.equal(pickNextSession(rows, "b1"), "a1");
 });
 
 // —— 纯渲染 ——
 
-test("renderReadView：三栏布局/左栏分组与合计/中栏 markdown+思考折叠/右栏占位", () => {
-	const m = newReadModel("web-dev");
-	applySessionList(m, [
-		{
-			sessionId: "sess-aaaabbbbcccc",
-			workspace: "/Users/x/proj",
-			status: "running",
-			processing: true,
-			attached: 1,
-			tokens: { input: 900, output: 100 },
-			costUsd: 0.42,
-			entryCount: 5,
-		},
-	]);
-	m.currentId = "sess-aaaabbbbcccc";
-	m.totals = { input: 900, output: 100, costUsd: 0.42 };
-	pushEntryLine(m, JSON.stringify({ type: "session", id: "s" }));
-	pushEntryLine(
-		m,
+test("renderStateFrame：三栏布局/左栏分组与合计/中栏 markdown+思考折叠/右栏占位", () => {
+	const state = createTuiState("web-dev");
+	state.setSessions(
+		applySessionListRows([
+			{
+				sessionId: "sess-aaaabbbbcccc",
+				workspace: "/Users/x/proj",
+				status: "running",
+				processing: true,
+				attached: 1,
+				tokens: { input: 900, output: 100 },
+				costUsd: 0.42,
+				entryCount: 5,
+			},
+		]),
+	);
+	state.setCurrentId("sess-aaaabbbbcccc");
+	state.setTotals({ input: 900, output: 100, costUsd: 0.42 });
+	state.appendEntryLine(JSON.stringify({ type: "session", id: "s" }));
+	state.appendEntryLine(
 		JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "写个计划" }] } }),
 	);
-	pushEntryLine(
-		m,
+	state.appendEntryLine(
 		JSON.stringify({
 			type: "message",
 			message: {
@@ -162,42 +157,75 @@ test("renderReadView：三栏布局/左栏分组与合计/中栏 markdown+思考
 		}),
 	);
 
-	const editor = new PondaEditor();
-	const lines = renderFrame(
-		{ model: m, input: { editor, completion: null, hint: "" }, dialog: null, fileTree: newFileTreeState() },
-		100,
-		24,
-	).map(stripAnsi);
+	const lines = renderStateFrame(state, 100, 24).map(stripAnsi);
 	assert.equal(lines.length, 24);
-	// 头部
-	assert.ok(lines[0]?.includes("ponda tui"));
-	assert.ok(lines[0]?.includes("env:web-dev"));
+	// 页眉：ponda + env + 会话点（opencode 式双侧页眉）
+	assert.ok(lines[0]?.includes("ponda"));
+	assert.ok(lines[0]?.includes("web-dev"));
 	assert.ok(lines[0]?.includes("sess-aaa"));
-	// 三栏分隔符出现在 body 行（页签行/输入区行不含，按内容过滤）
-	const bodyRows = lines
-		.slice(1, lines.length - 1)
-		.filter((r) => !r.startsWith("❯") && !r.includes("补全") && r.includes("│"));
-	assert.ok(bodyRows.length >= 5, `body 行数：${bodyRows.length}`);
-	for (const row of bodyRows) {
-		assert.equal((row.match(/│/g) ?? []).length, 2, `分隔符数量：${row}`);
-	}
-	// 左栏：工作区分组 + token/费用 + 合计
-	assert.ok(bodyRows.some((r) => r.includes("▾ /Users/x/proj (1)")));
-	assert.ok(bodyRows.some((r) => r.includes("sess-aaa")));
-	assert.ok(bodyRows.some((r) => r.includes("1.0k")));
-	assert.ok(bodyRows.some((r) => r.includes("Σ")));
-	// 中栏：用户消息 + markdown 渲染 + 思考折叠
-	assert.ok(bodyRows.some((r) => r.includes("you ▸")));
-	assert.ok(bodyRows.some((r) => r.includes("写个计划")));
-	assert.ok(bodyRows.some((r) => r.includes("思考")));
-	assert.ok(bodyRows.some((r) => r.includes("重构计划")));
-	assert.ok(bodyRows.some((r) => r.includes("补测试")));
-	// 右栏：todolist 占位 + 会话元信息
-	assert.ok(bodyRows.some((r) => r.includes("TODOLIST")));
-	assert.ok(bodyRows.some((r) => r.includes("M6 接入")));
-	assert.ok(bodyRows.some((r) => r.includes("status")));
-	// 底部键提示
-	assert.ok(lines[23]?.includes("q 退出"));
+	// 对话流：用户消息（❯ 前缀）+ markdown + 思考折叠
+	const chat = lines.slice(1, lines.length - 3).map((r) => r.trimStart());
+	assert.ok(
+		chat.some((r) => r.startsWith("❯") && r.includes("写个计划")),
+		"用户消息带 ❯ 前缀",
+	);
+	assert.ok(chat.some((r) => r.includes("思考")));
+	assert.ok(chat.some((r) => r.includes("重构计划")));
+	assert.ok(chat.some((r) => r.includes("补测试")));
+	// 生成中指示（processing 会话）
+	assert.ok(lines.some((r) => r.includes("生成中")));
+	// 圆角输入框 + 占位符之外的编辑器内容 + 页脚键提示
+	assert.ok(lines.some((r) => r.trimStart().startsWith("╭")));
+	assert.ok(lines.some((r) => r.trimStart().startsWith("│ ❯")));
+	assert.ok(lines[23]?.includes("⏎ 发送"));
+	assert.ok(lines[23]?.includes("1 会话"), "页脚左侧会话计数");
+});
+
+test("renderStateFrame：侧栏（Tab 呼出）与本地错误条目", () => {
+	const state = createTuiState("web");
+	state.setSessions(
+		applySessionListRows([
+			{
+				sessionId: "sess-aaaabbbbcccc",
+				workspace: "/w/p",
+				status: "detached",
+				processing: false,
+				attached: 0,
+				tokens: { input: 900, output: 100 },
+				costUsd: 0.42,
+				entryCount: 5,
+			},
+		]),
+	);
+	state.setTotals({ input: 900, output: 100, costUsd: 0.42 });
+	state.cycleSidebar(); // 隐藏 → 会话页
+	const withSidebar = renderStateFrame(state, 100, 24).map(stripAnsi);
+	assert.ok(
+		withSidebar.some((r) => r.includes("会话")),
+		"侧栏标题",
+	);
+	assert.ok(
+		withSidebar.some((r) => r.includes("/w/p (1)")),
+		"工作区分组",
+	);
+	assert.ok(
+		withSidebar.some((r) => r.includes("sess-aaa")),
+		"会话行",
+	);
+	state.cycleSidebar(); // 会话页 → 文件页
+	assert.ok(state.leftTab() === "files");
+	state.cycleSidebar(); // 文件页 → 隐藏
+	assert.ok(state.sidebarVisible() === false);
+
+	// 本地错误条目（daemon error 事件 → 红色 ⚠ 行）
+	state.setMode("nav"); // 任意模式均可渲染
+	state.setCurrentId("sess-aaaabbbbcccc");
+	state.appendError("model not found: 未配置 provider");
+	const withError = renderStateFrame(state, 100, 24).map(stripAnsi);
+	assert.ok(
+		withError.some((r) => r.includes("⚠ model not found")),
+		"错误条目可见",
+	);
 });
 
 // —— 端到端：daemon RPC → attach 游标重放 → 实时事件 → 滚动/退出 ——
@@ -257,7 +285,7 @@ test("PondaTui 端到端：daemon 会话 attach 重放渲染 + 实时事件 + �
 	apps.push(app);
 	await app.start(sessionId);
 
-	// 重放内容进入帧（TuiMainScreen 渲染为异步调度，轮询等待）
+	// 重放内容进入帧（信号驱动帧循环，轮询等待）
 	const has = (pred: (frame: string[]) => boolean) => frames.some(pred);
 	for (let i = 0; i < 150 && !has((f) => f.some((l) => l.includes("Review"))); i++) {
 		await new Promise((r) => setTimeout(r, 20));
@@ -267,7 +295,10 @@ test("PondaTui 端到端：daemon 会话 attach 重放渲染 + 实时事件 + �
 		"重放的 markdown 应出现在帧中",
 	);
 	assert.ok(has((f) => f.some((l) => l.includes("思考"))));
-	assert.ok(has((f) => f.some((l) => l.includes("/w/proj"))));
+	assert.ok(
+		has((f) => f.some((l) => l.includes("1 会话"))),
+		"页脚会话计数",
+	);
 
 	// 实时事件：send → echo 回复进入新帧（echo 序号来自 daemon 内部计数，正则匹配）
 	await client.request(Methods.sessionSend, { sessionId, text: "继续" });
@@ -280,8 +311,9 @@ test("PondaTui 端到端：daemon 会话 attach 重放渲染 + 实时事件 + �
 		"实时 assistant 事件应入帧",
 	);
 
-	// 键处理：j 滚动（帧数增长，等待调度）、q 退出
+	// 键处理：esc 进导航 → j 滚动（信号变化触发新帧）→ q 退出
 	const before = frames.length;
+	app.handleInput("\x1b");
 	app.handleInput("j");
 	for (let i = 0; i < 50 && frames.length <= before; i++) {
 		await new Promise((r) => setTimeout(r, 20));

@@ -73,13 +73,15 @@ jobs:
       - name: Bundle CLI
         run: node scripts/build-ponda-bundle.mjs
 
-      - name: Smoke test bundle
+      - name: Smoke test bundle (clean directory, no node_modules)
         env:
           PONDA_HOME: ${{ runner.temp }}/ponda-home
         run: |
-          node packages/cli/dist/ponda.mjs --version
-          node packages/cli/dist/ponda.mjs init
-          node packages/cli/dist/ponda.mjs env list
-          node packages/cli/dist/ponda.mjs run -p "hello bundle"
-          node packages/cli/dist/ponda.mjs daemon stop
-          node packages/cli/dist/ponda.mjs doctor
+          mkdir -p "$RUNNER_TEMP/clean" && cp packages/cli/dist/ponda.mjs "$RUNNER_TEMP/clean/"
+          cd "$RUNNER_TEMP/clean"
+          node ponda.mjs --version
+          node ponda.mjs init
+          node ponda.mjs env list
+          node ponda.mjs run -p "hello bundle"
+          node ponda.mjs daemon stop
+          node ponda.mjs doctor

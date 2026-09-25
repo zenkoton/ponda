@@ -59,15 +59,18 @@ jobs:
       - name: Bundle CLI
         run: node scripts/build-ponda-bundle.mjs
 
-      - name: Smoke test bundle
+      - name: Smoke test bundle (clean directory, no node_modules)
         env:
           PONDA_HOME: ${{ runner.temp }}/ponda-home
         run: |
-          node packages/cli/dist/ponda.mjs --version
-          node packages/cli/dist/ponda.mjs init
-          node packages/cli/dist/ponda.mjs env list
-          node packages/cli/dist/ponda.mjs run -p "release smoke"
-          node packages/cli/dist/ponda.mjs daemon stop
+          mkdir -p "$RUNNER_TEMP/clean" && cp packages/cli/dist/ponda.mjs "$RUNNER_TEMP/clean/"
+          cd "$RUNNER_TEMP/clean"
+          node ponda.mjs --version
+          node ponda.mjs init
+          node ponda.mjs env list
+          node ponda.mjs run -p "release smoke"
+          node ponda.mjs daemon stop
+          node ponda.mjs doctor
 
       - name: Stage release assets
         run: |
@@ -76,7 +79,7 @@ jobs:
           cp scripts/ponda-install.sh dist-release/ponda-install.sh
           chmod +x dist-release/ponda.mjs dist-release/ponda-install.sh
           # 安装包：bundle + 安装脚本 + 简要说明
-          tar -czf "dist-release/ponda-${TAG}.tar.gz" \
+          tar -czf "dist-release/${TAG}.tar.gz" \
             -C dist-release ponda.mjs ponda-install.sh \
             -C "$GITHUB_WORKSPACE" README.md
           cat > dist-release/INSTALL.md <<'EOF'
@@ -100,7 +103,7 @@ jobs:
           Note: `ponda pi` (upstream pi pass-through) additionally requires a checkout of
           this repository with `npm run build`; everything else works from the bundle alone.
           EOF
-          ( cd dist-release && shasum -a 256 ponda.mjs "ponda-${TAG}.tar.gz" ponda-install.sh > SHA256SUMS )
+          ( cd dist-release && shasum -a 256 ponda.mjs "${TAG}.tar.gz" ponda-install.sh > SHA256SUMS )
 
       - name: Create GitHub Release
         env:
@@ -119,7 +122,7 @@ jobs:
           Install: see \`INSTALL.md\`. Note: \`ponda pi\` requires a source checkout with \`npm run build\`." \
             --verify-tag \
             dist-release/ponda.mjs \
-            "dist-release/ponda-${TAG}.tar.gz" \
+            "dist-release/${TAG}.tar.gz" \
             dist-release/ponda-install.sh \
             dist-release/INSTALL.md \
             dist-release/SHA256SUMS

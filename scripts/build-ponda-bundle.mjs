@@ -17,13 +17,9 @@ const outfile = join(outDir, "ponda.mjs");
 
 // 与上游 pi bundle（scripts/build-coding-agent-bundle.mjs）一致的可选依赖策略
 const allowedExternalPackages = [
-	"@earendil-works/chord",
-	"@earendil-works/chord/bundler",
-	"@earendil-works/chord/context",
-	"@earendil-works/chord/delta",
-	"@earendil-works/chord/node",
-	"@silvia-odwyer/photon-node",
-	"jiti",
+	// 注意：与上游 pi 的 npm 发布形态不同，本 bundle 免 node_modules 单文件运行，
+	// 因此 @earendil-works/chord* 与 jiti 必须内联（上游 external 是因为其发布带依赖）。
+	"@silvia-odwyer/photon-node", // 可选原生加速，缺失时上游自动回退 JS
 	"bufferutil",
 	"utf-8-validate",
 	"kerberos",

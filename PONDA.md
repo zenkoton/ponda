@@ -27,7 +27,7 @@ node packages/cli/src/bin.ts skills add <本地skill目录> <name>
 node packages/cli/src/bin.ts web-dev skills list   # 不切环境直接查
 
 # 5) 测试（node:test，零额外依赖）
-for p in core cli sandbox metrics tui-next; do (cd packages/$p && node --test test/*.test.ts); done
+for p in core cli daemon rpc sandbox metrics tui-next; do (cd packages/$p && node --test test/*.test.ts); done
 ```
 
 `PONDA_HOME` 环境变量可覆盖 `~/.ponda` 根目录（测试与多实例隔离用）。

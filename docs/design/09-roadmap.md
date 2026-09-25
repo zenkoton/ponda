@@ -4,6 +4,22 @@
 >
 > **实施进度（2026-09-25）**：M0 ✅、M1 ✅、M2 ✅（registry 通道除外）、M3 核心 ✅（容器后端与 pi 运行时接入待做）、M4 ✅（packages/rpc + packages/daemon）、**M5 ✅（三栏读视图 + 交互全集）、M6 ✅（goal 状态机/成果契约确认/校准代码与收尾比对/契约变更审批/右栏成果状态 + ponda goal CLI；真实 agent planning 由 P4 接入）、M8 ✅（SwarmRuntime：cell 生成/own-worktree 写隔离/信箱通信/并发与费用熔断/失败重试/TUI 切换条与插话；真实 spawn_subagent 工具经 P4 接入主 agent）、M9 ✅（WikiStore：目录/frontmatter 规范、首次+增量构建、confidence 衰减复验、倒排索引检索、wiki_search/read/update 工具注册、TUI @ 补全含 .wiki；语义索引与 agent 自动触发待 P4）、**M3 ✅（容器后端：Docker/Podman 抽象 + 三域 bind-mount 推导 + overlayfs 上层 diff 审计与 git 快照交叉比对 + 无容器降级链 audit-only/高危默认拒绝 + ponda sandbox backend；真实镜像构建与 bash 工具容器内执行随 P4）、运行时接入 P1 ✅（pi getAgentDir 原生读 ponda state.json）+ **P4 ✅（真实 agent 循环）、M2 ✅（registry npm:/git: 安装通道）、M10 ✅（ponda stats CLI）、P3 ✅（skill-state (P,Σ,O) 协议接入 PiAgentLoop）**、M7 核心 ✅（⊕ 合并/协议校验/领域 schema；接入待 P1）、M10 核心 ✅（事件模型/脱敏/JSONL sink/技能指标；CLI 呈现待做）。详见 PONDA.md 与 git 提交记录。
 
+**批次 1（P0 修复，2026-09-25 审计后）**：daemon 按会话接入真实 PiAgentLoop + coding 工具（模型三级解析 PONDA_MODEL > ponda.json > env models.json）；bindToolGuard 形状修复 + sandbox 三域路由/权限三档接入生产管线（tool-guard）；TUI 斜杠命令真实执行；history attach 前缀解析 + 真实恢复；telemetry 默认关闭；`ponda todo ls`。差距清单与修复进度见 `docs/audit/2026-09-25-completeness-audit.md`。
+
+**批次 2（P1 修复，2026-09-26）**：凭据隔离（明文 apiKey → env auth.json 0600，render/池/CLI/doctor 全链剥离，daemon getApiKey 三级解析）；任务/看板/envelope 持久化（envs/<env>/state/，daemon 重启恢复）+ `ponda goal resume`；skill-state 严格协议（历史剥离——prompt 恒为 (P,Σ,O)、rollback-retry ≤3、超限降级）；模型工具面（todo_write/todo_read、spawn_subagent/swarm_status/send_message/cancel_subagent、memory_write）。
+
+**批次 3-1（数据层，2026-09-26）**：metrics.db（node:sqlite WAL 五表 + etl_cursor，全 UPSERT 幂等）与 ETL（游标增量、rebuild --from 重放、daemon 退出自动同步）；18 类 telemetry 事件全部接线（message 带 tokens/costUsd、session.end、task.lifecycle、deliverable.verify、permission.*、swarm.cell、state.patch/compaction、container.lifecycle、error、skill.invoke、env.switch、resource.change、sandbox.settle）；`ponda stats` 升级（rebuild/prune/audit + tasks/permissions 子命令，sessions/cost 走指标层带 JSONL 回退）。
+
+**批次 3-2（TUI 深度项，2026-09-26）**：输入区状态行（mode/think/model/ctx 占比，超 80% 警示，^x p 循环切换）；工具调用折叠（ponda.tool 会话条目 → ▸ 行 + >5 同类聚合 N×）；右栏三段（TODOLIST 进度条/成果状态/权限通知）。
+
+**批次 3-3（沙箱结算管线，2026-09-26）**：turn_end 快照链接入真实循环（auto: turn <n>，同内容去重，baseline 记录）；SandboxActivity 状态机 + 持久化；`ponda sandbox snapshots/commit/rollback`（结算 commit 规范 ponda(<task|session>)，非 TTY 无旁路）；TUI `/undo` 撤销入口（确认弹窗 + RPC 回滚）。
+
+**批次 4-1（headless，2026-09-26）**：`ponda run -p`（对标 claude -p）——daemon 会话驱动的非交互单轮，--json/--new-session/--mode/--timeout，复用真实工具链与沙箱守卫。
+
+**批次 4-2/4-3（收官，2026-09-26）**：MCP stdio 客户端（mcp.json 工具注入会话工具面，per-env 隔离落运行时）；`ponda mcp` 资源类别；env create 旗标面（--tool/--privilege/--skill/--no-render）；wiki 结算后增量复验；BacktestSpec/Report 接口冻结；dataset full 级（RewardSignals/EnvSnapshotRef）。
+
+**批次 4-4（P2 收尾，2026-09-26）**：Ctrl-P 快捷键真实绑定（zsh widget/bash bind -x/fish bind）；TUI `/end` 会话结束（RPC session.end）；markdown 代码块语言标签行；README/PONDA.md 文档漂移清理（tui-next 路径、测试命令）。
+
 ## 1. 里程碑总览与依赖图
 
 ```
